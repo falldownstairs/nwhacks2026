@@ -101,7 +101,8 @@ export default function CheckInPage() {
             hrHistoryRef.current.shift();
           }
         }
-        if (data.hrv) {
+        // HRV can be null if calculation is still initializing
+        if (data.hrv !== undefined && data.hrv !== null) {
           setCurrentHRV(data.hrv);
         }
       } catch (e) {
@@ -149,7 +150,10 @@ export default function CheckInPage() {
             );
             vitals = {
               heart_rate: avgHR,
-              hrv: currentHRV || Math.max(20, 50 - Math.abs(avgHR - 70)),
+              // Use real HRV if available (RMSSD in ms), otherwise estimate based on HR
+              hrv: currentHRV !== null && currentHRV !== undefined 
+                ? currentHRV 
+                : Math.max(20, 50 - Math.abs(avgHR - 70)),
               quality_score: confidence / 100,
             };
           } else {
