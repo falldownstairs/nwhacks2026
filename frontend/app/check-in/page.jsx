@@ -71,8 +71,10 @@ export default function CheckInPage() {
   const [faceDetected, setFaceDetected] = useState(false);
   const [currentHR, setCurrentHR] = useState(null);
   const [currentHRV, setCurrentHRV] = useState(null);
-  const [confidence, setConfidence] = useState(0);
   const [calibrationProgress, setCalibrationProgress] = useState(0);
+  
+  // Refs to avoid useEffect dependency issues with countdown
+  const currentHRVRef = useRef(null);
 
   // Connect to WebSocket camera
   const connectCamera = useCallback(() => {
@@ -91,7 +93,6 @@ export default function CheckInPage() {
         const data = JSON.parse(event.data);
         setFrameData(data.frame);
         setFaceDetected(data.face_detected);
-        setConfidence(data.confidence || 0);
         setCalibrationProgress(data.calibration_progress || 0);
         
         if (data.heart_rate) {
@@ -104,6 +105,7 @@ export default function CheckInPage() {
         // HRV can be null if calculation is still initializing
         if (data.hrv !== undefined && data.hrv !== null) {
           setCurrentHRV(data.hrv);
+          currentHRVRef.current = data.hrv;  // Keep ref in sync
         }
       } catch (e) {
         console.error('Error parsing camera data:', e);
@@ -148,13 +150,15 @@ export default function CheckInPage() {
             const avgHR = Math.round(
               hrHistoryRef.current.reduce((a, b) => a + b, 0) / hrHistoryRef.current.length
             );
+            // Use ref for HRV to avoid dependency issues
+            const hrvValue = currentHRVRef.current;
             vitals = {
               heart_rate: avgHR,
               // Use real HRV if available (RMSSD in ms), otherwise estimate based on HR
-              hrv: currentHRV !== null && currentHRV !== undefined 
-                ? currentHRV 
+              hrv: hrvValue !== null && hrvValue !== undefined 
+                ? hrvValue 
                 : Math.max(20, 50 - Math.abs(avgHR - 70)),
-              quality_score: confidence / 100,
+              quality_score: 0.85,
             };
           } else {
             vitals = generateVitals(demoMode);
@@ -172,7 +176,7 @@ export default function CheckInPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [step, demoMode, useRealCamera, disconnectCamera, currentHRV, confidence]);
+  }, [step, demoMode, useRealCamera, disconnectCamera]);
 
   // Analyze and redirect
   useEffect(() => {
@@ -207,9 +211,9 @@ export default function CheckInPage() {
 
   const startMeasurement = () => {
     hrHistoryRef.current = [];
+    currentHRVRef.current = null;
     setCurrentHR(null);
     setCurrentHRV(null);
-    setConfidence(0);
     setStep(2);
     setCountdown(30);
     setProgress(0);
@@ -356,11 +360,6 @@ export default function CheckInPage() {
                       {currentHR && (
                         <div className="bg-blue-500/80 px-3 py-1 rounded-full text-sm font-bold">
                           ❤️ {currentHR} BPM
-                        </div>
-                      )}
-                      {confidence > 0 && (
-                        <div className="bg-purple-500/80 px-3 py-1 rounded-full text-sm">
-                          {confidence}% confidence
                         </div>
                       )}
                     </div>

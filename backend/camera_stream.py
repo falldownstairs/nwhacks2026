@@ -120,20 +120,10 @@ class WebSocketHeartRateMonitor(HeartRateMonitor):
                         2,
                     )
 
-                confidence = min(100, len(self.hr_history) * 10)
-                cv2.putText(
-                    frame,
-                    f"Confidence: {confidence}%",
-                    (20, 120),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (200, 200, 200),
-                    2,
-                )
                 cv2.putText(
                     frame,
                     "Status: MEASURING",
-                    (20, 160),
+                    (20, 120),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (0, 255, 0),
