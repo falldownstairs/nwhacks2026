@@ -1,15 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { Activity, LayoutDashboard, Menu, X } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Menu, X, Activity, Brain, Calendar, LayoutDashboard } from 'lucide-react';
+import { useState } from 'react';
 
 const navLinks = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/check-in', label: 'Check-In', icon: Activity },
-  { href: '/insights', label: 'Insights', icon: Brain },
-  { href: '/timeline', label: 'Timeline', icon: Calendar },
 ];
 
 export default function Navigation() {

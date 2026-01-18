@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
-import { Heart, Activity, AlertTriangle, AlertCircle, CheckCircle, Camera, CameraOff, Wifi, WifiOff } from 'lucide-react';
 import { analyzeVitals } from '@/lib/api';
 import { saveAnalysis, saveVitals } from '@/lib/storage';
+import { Activity, AlertCircle, AlertTriangle, Camera, CheckCircle, Heart, Wifi, WifiOff } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const demoScenarios = {
   normal: {
@@ -177,7 +177,7 @@ export default function CheckInPage() {
         });
         saveVitals(capturedVitals);
         saveAnalysis(result);
-        router.push('/insights');
+        router.push('/');
       } catch (error) {
         console.error('Analysis failed:', error);
         setAnalyzing(false);

@@ -1,17 +1,16 @@
 'use client';
 
-import { Heart, Activity, Brain, Calendar, RefreshCw } from 'lucide-react';
+import '@/lib/chartConfig';
+import { Activity, Heart, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { Line } from 'react-chartjs-2';
-import '@/lib/chartConfig';
 
-import { usePatientData } from '@/hooks/usePatientData';
-import VitalCard from '@/components/VitalCard';
 import RiskBadge from '@/components/RiskBadge';
-import LoadingSpinner from '@/components/LoadingSpinner';
 import SkeletonCard from '@/components/SkeletonCard';
-import { calculateRiskLevel } from '@/lib/riskCalculator';
+import VitalCard from '@/components/VitalCard';
+import { usePatientData } from '@/hooks/usePatientData';
 import { formatRelativeTime, getDayName } from '@/lib/formatters';
+import { calculateRiskLevel } from '@/lib/riskCalculator';
 
 export default function Dashboard() {
   const { patient, vitals, latestVital, alerts, loading, error, refetch } = usePatientData('maria_001');
@@ -192,7 +191,7 @@ export default function Dashboard() {
         {/* Card 4: Quick Actions */}
         <div className="card animate-fadeIn" style={{ animationDelay: '0.4s' }}>
           <h2 className="section-title flex items-center gap-2">
-            <Calendar className="w-5 h-5 text-purple-400" />
+            <Activity className="w-5 h-5 text-purple-400" />
             Quick Actions
           </h2>
           <div className="space-y-3">
@@ -202,20 +201,6 @@ export default function Dashboard() {
             >
               <Activity className="w-5 h-5" />
               Start Daily Check-In
-            </Link>
-            <Link
-              href="/insights"
-              className="flex items-center justify-center gap-2 w-full bg-purple-500 hover:bg-purple-600 text-white py-3 px-4 rounded-lg transition-colors"
-            >
-              <Brain className="w-5 h-5" />
-              View Agent Analysis
-            </Link>
-            <Link
-              href="/timeline"
-              className="flex items-center justify-center gap-2 w-full bg-green-500 hover:bg-green-600 text-white py-3 px-4 rounded-lg transition-colors"
-            >
-              <Calendar className="w-5 h-5" />
-              See Timeline Comparison
             </Link>
           </div>
         </div>

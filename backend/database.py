@@ -1,8 +1,9 @@
 # database.py
-from pymongo import MongoClient
-from dotenv import load_dotenv
 import os
 from datetime import datetime
+
+from dotenv import load_dotenv
+from pymongo import MongoClient
 
 # Load .env file
 load_dotenv()
