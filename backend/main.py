@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -10,6 +10,7 @@ from db_helpers import (
 )
 from database import patients, vitals
 from agents import run_agent_analysis
+from camera_stream import camera_websocket_endpoint
 
 app = FastAPI(title="Chronic Disease MVP", version="1.0.0")
 
@@ -21,6 +22,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============== WebSocket for Camera ==============
+
+@app.websocket("/ws/camera")
+async def websocket_camera(websocket: WebSocket):
+    """WebSocket endpoint for real-time camera heart rate monitoring"""
+    await camera_websocket_endpoint(websocket)
 
 # ============== Pydantic Models ==============
 
