@@ -23,7 +23,7 @@ export default function Navigation() {
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 text-xl font-bold">
             <span>🏥</span>
-            <span className="hidden sm:inline">Chronic Disease Coach</span>
+            <span className="hidden sm:inline">Pulsera</span>
             <span className="sm:hidden">CDC</span>
           </Link>
 
