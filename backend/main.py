@@ -1,4 +1,5 @@
-# main.py
+import asyncio
+import sys
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,6 +13,12 @@ from database import patients, vitals
 from agents import run_agent_analysis
 from camera_stream import camera_websocket_endpoint
 
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 app = FastAPI(title="Chronic Disease MVP", version="1.0.0")
 
 # CORS for Next.js frontend
