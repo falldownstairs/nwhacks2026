@@ -78,7 +78,8 @@ const TriageChat = forwardRef(function TriageChat({
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     
     try {
-      const ws = new WebSocket('ws://localhost:8000/ws/triage');
+      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000';
+      const ws = new WebSocket(`${wsUrl}/ws/triage`);
       wsRef.current = ws;
       
       ws.onopen = () => {

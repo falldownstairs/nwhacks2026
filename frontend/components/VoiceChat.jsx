@@ -258,7 +258,7 @@ const VoiceChat = forwardRef(function VoiceChat({
     }, 10000); // 10 seconds
     
     // Check if backend is likely running first
-    const wsUrl = `ws://localhost:8000/ws/chat/${patientId}`;
+    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}/ws/chat/${patientId}`;
     console.log('Attempting to connect to:', wsUrl);
     
     const ws = new WebSocket(wsUrl);

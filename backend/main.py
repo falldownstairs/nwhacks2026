@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -11,9 +12,13 @@ from camera_stream import camera_websocket_endpoint
 from database import patients, vitals
 from db_helpers import (calculate_stats, get_all_vitals, get_baseline,
                         get_patient, get_recent_vitals, store_new_vital)
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Load environment variables
+load_dotenv()
 
 try:
     import uvloop
@@ -24,10 +29,21 @@ except ImportError:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 app = FastAPI(title="Chronic Disease MVP", version="1.0.0")
 
-# CORS for Next.js frontend
+# CORS for Next.js frontend - allow configured origins plus localhost for dev
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    frontend_url,
+    # Also allow the https version if http was provided
+    frontend_url.replace("http://", "https://") if frontend_url.startswith("http://") else frontend_url,
+]
+# Remove duplicates
+allowed_origins = list(set(allowed_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

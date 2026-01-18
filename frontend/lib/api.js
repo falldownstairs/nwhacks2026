@@ -1,7 +1,11 @@
 import axios from "axios";
 
+// Use environment variable for backend URL, fallback to localhost for development
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+
 const api = axios.create({
-    baseURL: "http://localhost:8000",
+    baseURL: BACKEND_URL,
     headers: {
         "Content-Type": "application/json",
     },
@@ -111,7 +115,7 @@ export async function transcribeAudio(
  * @returns {WebSocket} WebSocket connection
  */
 export function createChatWebSocket(patientId) {
-    return new WebSocket(`ws://localhost:8000/ws/chat/${patientId}`);
+    return new WebSocket(`${WS_URL}/ws/chat/${patientId}`);
 }
 
 export default api;
