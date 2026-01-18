@@ -101,11 +101,28 @@ export default function VoiceChat({
     }
   }, []);
 
+  // Track if connection ever succeeded (to distinguish failed connect vs disconnect)
+  const hadConnectionRef = useRef(false);
+  const connectionTimeoutRef = useRef(null);
+
   // Connect to WebSocket - defined after handleMessage
   const connectChat = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     
     setConnecting(true);
+    hadConnectionRef.current = false;
+    
+    // Set a timeout to show error if connection takes too long
+    connectionTimeoutRef.current = setTimeout(() => {
+      if (!hadConnectionRef.current) {
+        setMessages(prev => [...prev, {
+          role: 'system',
+          content: 'Unable to connect to Pulse AI. Please ensure the backend server is running.',
+          timestamp: new Date().toISOString(),
+          isError: true
+        }]);
+      }
+    }, 10000); // 10 seconds
     
     // Check if backend is likely running first
     const wsUrl = `ws://localhost:8000/ws/chat/${patientId}`;
@@ -116,8 +133,18 @@ export default function VoiceChat({
 
     ws.onopen = () => {
       console.log('Chat WebSocket connected');
+      hadConnectionRef.current = true;
       setConnected(true);
       setConnecting(false);
+      // Clear the timeout since we connected successfully
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+        connectionTimeoutRef.current = null;
+      }
+      // Clear any connection error messages that appeared during handshake
+      setMessages(prev => prev.filter(msg => 
+        !(msg.isError && msg.content.includes('Unable to connect'))
+      ));
       // Request greeting
       ws.send(JSON.stringify({ type: 'get_greeting' }));
     };
@@ -133,18 +160,8 @@ export default function VoiceChat({
 
     ws.onerror = () => {
       // WebSocket errors don't expose details for security reasons
-      // This usually means the server is not reachable
-      console.warn('Chat WebSocket connection failed - backend may not be running');
-      setConnected(false);
-      setConnecting(false);
-      
-      // Add a helpful message to the chat
-      setMessages(prev => [...prev, {
-        role: 'system',
-        content: 'Unable to connect to Pulse AI. Please ensure the backend server is running.',
-        timestamp: new Date().toISOString(),
-        isError: true
-      }]);
+      // Just log - we'll handle the user message in timeout if needed
+      console.warn('Chat WebSocket error event');
     };
 
     ws.onclose = (event) => {
@@ -160,6 +177,10 @@ export default function VoiceChat({
       connectChat();
     }
     return () => {
+      // Clean up timeout on unmount
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
