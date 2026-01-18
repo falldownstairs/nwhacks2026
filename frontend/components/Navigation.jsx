@@ -1,6 +1,7 @@
 'use client';
 
 import { Activity, LayoutDashboard, Menu, X } from 'lucide-react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
@@ -21,10 +22,8 @@ export default function Navigation() {
       <div className="max-w-7xl mx-auto px-4">
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
-          <Link href="/" className="flex items-center gap-2 text-xl font-bold">
-            <span>🏥</span>
-            <span className="hidden sm:inline">Pulsera</span>
-            <span className="sm:hidden">CDC</span>
+          <Link href="/" className="flex items-center">
+            <Image src="/logo.png" alt="Pulsera" width={180} height={60} className="h-14 w-auto" />
           </Link>
 
           {/* Desktop Navigation */}
