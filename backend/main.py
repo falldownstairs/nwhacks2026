@@ -118,44 +118,7 @@ async def stream_tts_to_websocket(websocket: WebSocket, text: str):
 @app.websocket("/ws/camera")
 async def websocket_camera(websocket: WebSocket):
     """WebSocket endpoint for real-time camera heart rate monitoring"""
-    # Accept with subprotocol if provided (for ngrok bypass)
-    subprotocol = None
-    if websocket.headers.get("sec-websocket-protocol"):
-        subprotocol = "ngrok-skip-browser-warning"
-    await websocket.accept(subprotocol=subprotocol)
-    
-    # Import here to avoid circular import
-    from camera_stream import WebSocketHeartRateMonitor
-    
-    monitor = None
-    try:
-        monitor = WebSocketHeartRateMonitor()
-        monitor.is_running = True
-
-        while monitor.is_running:
-            data = monitor.get_frame_data()
-            if data:
-                await websocket.send_json(data)
-
-            # ~30 FPS
-            await asyncio.sleep(0.033)
-
-            # Check for stop command
-            try:
-                msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
-                if msg == "stop":
-                    break
-            except asyncio.TimeoutError:
-                pass
-
-    except WebSocketDisconnect:
-        print("WebSocket disconnected")
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        if monitor:
-            monitor.release()
-        print("Camera released")
+    await camera_websocket_endpoint(websocket)
 
 
 # ============== WebSocket for Voice Chat ==============
@@ -182,11 +145,7 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
     - {"type": "session_summary", "data": {...}}
     - {"type": "error", "message": "error description"}
     """
-    # Accept with subprotocol if provided (for ngrok bypass)
-    subprotocol = None
-    if websocket.headers.get("sec-websocket-protocol"):
-        subprotocol = "ngrok-skip-browser-warning"
-    await websocket.accept(subprotocol=subprotocol)
+    await websocket.accept()
 
     # Create chat agent for this session
     try:

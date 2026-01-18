@@ -91,8 +91,7 @@ export default function CheckInPage() {
     setConnectionError(null);
     
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000';
-    // Use subprotocol to bypass ngrok browser warning (ngrok checks Sec-WebSocket-Protocol)
-    const ws = new WebSocket(`${wsUrl}/ws/camera`, ['ngrok-skip-browser-warning']);
+    const ws = new WebSocket(`${wsUrl}/ws/camera`);
     wsRef.current = ws;
 
     ws.onopen = () => {

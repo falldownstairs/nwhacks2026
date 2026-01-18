@@ -261,8 +261,7 @@ const VoiceChat = forwardRef(function VoiceChat({
     const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}/ws/chat/${patientId}`;
     console.log('Attempting to connect to:', wsUrl);
     
-    // Use subprotocol to bypass ngrok browser warning
-    const ws = new WebSocket(wsUrl, ['ngrok-skip-browser-warning']);
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {

@@ -1,7 +1,9 @@
 # seed_data.py
-from database import patients, vitals
-from datetime import datetime, timedelta
 import random
+from datetime import datetime, timedelta
+
+from database import patients, vitals
+
 
 def clear_database():
     """Wipe everything for fresh start"""
@@ -13,8 +15,8 @@ def create_maria():
     """Create our demo patient"""
     maria = {
         "_id": "maria_001",
-        "name": "Maria Gonzalez",
-        "age": 68,
+        "name": "Prajwal Prashanth",
+        "age": 18,
         "conditions": ["Heart Failure", "Type 2 Diabetes"],
         "baseline": {
             "heart_rate": 68,
@@ -27,12 +29,12 @@ def create_maria():
     print("✓ Created patient: Maria Gonzalez")
     return maria["_id"]
 
-def generate_normal_vitals(patient_id, days=30):
-    """Generate 30 days of stable vitals"""
+def generate_normal_vitals(patient_id, days=30, skip_last_days=0):
+    """Generate stable vitals, optionally skipping recent days for declining period"""
     base_date = datetime.utcnow() - timedelta(days=days)
     
     measurements = []
-    for day in range(days):
+    for day in range(days - skip_last_days):
         timestamp = base_date + timedelta(days=day, hours=8)  # 8 AM each day
         
         vital = {
@@ -45,7 +47,7 @@ def generate_normal_vitals(patient_id, days=30):
         measurements.append(vital)
     
     vitals.insert_many(measurements)
-    print(f"✓ Added {days} days of normal vitals")
+    print(f"✓ Added {days - skip_last_days} days of normal vitals")
 
 def generate_declining_vitals(patient_id, days=5):
     """Generate 5 days of declining vitals (decompensation)"""
@@ -84,14 +86,18 @@ def seed_everything():
     
     clear_database()
     patient_id = create_maria()
-    generate_normal_vitals(patient_id, days=30)
-    generate_declining_vitals(patient_id, days=5)
+    
+    # Generate 30 days total: 25 normal + 5 declining (no overlap)
+    declining_days = 5
+    generate_normal_vitals(patient_id, days=30, skip_last_days=declining_days)
+    generate_declining_vitals(patient_id, days=declining_days)
     
     # Verify
     total_vitals = vitals.count_documents({"patient_id": patient_id})
     print(f"\n✅ Database ready! Total vitals: {total_vitals}")
-    print(f"📅 Date range: {30+5} days")
+    print(f"📅 Date range: 30 days (25 normal + 5 declining)")
     print(f"👤 Patient ID: {patient_id}")
 
 if __name__ == "__main__":
     seed_everything()
+    
