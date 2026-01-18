@@ -3,7 +3,7 @@
 import VoiceChat from '@/components/VoiceChat';
 import { analyzeVitals } from '@/lib/api';
 import { saveAnalysis, saveVitals } from '@/lib/storage';
-import { Activity, AlertCircle, AlertTriangle, Camera, CheckCircle, Heart, MessageCircle, Wifi, WifiOff } from 'lucide-react';
+import { Activity, AlertCircle, AlertTriangle, Camera, CheckCircle, Heart, Loader2, MessageCircle, Wifi, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -51,6 +51,7 @@ export default function CheckInPage() {
   const router = useRouter();
   const wsRef = useRef(null);
   const hrHistoryRef = useRef([]);
+  const voiceChatRef = useRef(null);
 
   const [step, setStep] = useState(1);
   const [countdown, setCountdown] = useState(30);
@@ -63,6 +64,10 @@ export default function CheckInPage() {
   // Voice chat state
   const [chatActive, setChatActive] = useState(false);
   const [vitalsForChat, setVitalsForChat] = useState(null);
+  const [chatState, setChatState] = useState({ isSpeaking: false, isRecording: false, isProcessing: false });
+  const [measurementComplete, setMeasurementComplete] = useState(false);
+  const [waitingForChat, setWaitingForChat] = useState(false);
+  const [triageMode, setTriageMode] = useState(false);  // For triage continuation
   
   // WebSocket camera state
   const [connected, setConnected] = useState(false);
@@ -75,6 +80,11 @@ export default function CheckInPage() {
   
   // Refs to avoid useEffect dependency issues with countdown
   const currentHRVRef = useRef(null);
+
+  // Handle chat state changes
+  const handleChatStateChange = useCallback((state) => {
+    setChatState(state);
+  }, []);
 
   // Connect to WebSocket camera
   const connectCamera = useCallback(() => {
@@ -135,7 +145,7 @@ export default function CheckInPage() {
     setFrameData(null);
   }, []);
 
-  // Countdown effect
+  // Countdown effect - captures vitals but waits for chat to complete
   useEffect(() => {
     if (step !== 2) return;
 
@@ -165,9 +175,10 @@ export default function CheckInPage() {
           }
           
           setCapturedVitals(vitals);
-          setVitalsForChat(vitals);  // Send vitals to chat for AI response
           setStep(3);
           disconnectCamera();
+          setMeasurementComplete(true);
+          setWaitingForChat(true);
           return 0;
         }
         return prev - 1;
@@ -178,28 +189,44 @@ export default function CheckInPage() {
     return () => clearInterval(interval);
   }, [step, demoMode, useRealCamera, disconnectCamera]);
 
-  // Analyze and redirect
+  // Wait for chat to be idle before starting triage
   useEffect(() => {
-    if (step !== 3 || !capturedVitals) return;
-
-    setAnalyzing(true);
-    const timeout = setTimeout(async () => {
-      try {
-        const result = await analyzeVitals({
-          patient_id: 'maria_001',
-          ...capturedVitals,
-        });
-        saveVitals(capturedVitals);
-        saveAnalysis(result);
-        router.push('/');
-      } catch (error) {
-        console.error('Analysis failed:', error);
-        setAnalyzing(false);
-      }
-    }, 2000);
-
-    return () => clearTimeout(timeout);
-  }, [step, capturedVitals, router]);
+    if (!measurementComplete || !waitingForChat || !capturedVitals) return;
+    
+    const { isSpeaking, isRecording, isProcessing } = chatState;
+    const chatIsIdle = !isSpeaking && !isRecording && !isProcessing;
+    
+    if (chatIsIdle) {
+      // Wait a bit after chat becomes idle before starting triage
+      const idleTimeout = setTimeout(async () => {
+        // Double-check still idle
+        if (voiceChatRef.current && voiceChatRef.current.isIdle()) {
+          // Analyze vitals
+          setAnalyzing(true);
+          try {
+            const result = await analyzeVitals({
+              patient_id: 'maria_001',
+              ...capturedVitals,
+            });
+            saveVitals(capturedVitals);
+            saveAnalysis(result);
+            
+            // Send vitals to VoiceChat to trigger triage response
+            setVitalsForChat(capturedVitals);
+            setTriageMode(true);
+            setWaitingForChat(false);
+            setAnalyzing(false);
+            setStep(4);  // Move to triage step
+          } catch (error) {
+            console.error('Analysis failed:', error);
+            setAnalyzing(false);
+          }
+        }
+      }, 3000); // Wait 3 seconds of idle time
+      
+      return () => clearTimeout(idleTimeout);
+    }
+  }, [measurementComplete, waitingForChat, chatState, capturedVitals]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -310,10 +337,10 @@ export default function CheckInPage() {
         </div>
       )}
 
-      {/* Steps 2 & 3: Two-column layout with persistent Voice Chat */}
-      {(step === 2 || step === 3) && (
+      {/* Steps 2, 3 & 4: Two-column layout with persistent Voice Chat */}
+      {(step === 2 || step === 3 || step === 4) && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Left Side: Camera Feed (step 2) or Results (step 3) */}
+          {/* Left Side: Camera Feed (step 2) or Results (step 3 & 4) */}
           <div className="card text-center py-6">
             {step === 2 ? (
               /* Step 2: Camera Feed */
@@ -415,7 +442,7 @@ export default function CheckInPage() {
                 <p className="text-sm text-gray-500 mt-2">{Math.round(progress)}% complete</p>
               </>
             ) : (
-              /* Step 3: Results */
+              /* Step 3 & 4: Results */
               <div className="py-6">
                 {analyzing ? (
                   <>
@@ -444,18 +471,30 @@ export default function CheckInPage() {
                         <p className="text-sm text-gray-400">Quality</p>
                       </div>
                     </div>
+                    
+                    {/* Finish button for step 4 (triage mode) */}
+                    {step === 4 && triageMode && (
+                      <button
+                        onClick={() => router.push('/')}
+                        className="w-full bg-green-600 hover:bg-green-700 text-white py-3 px-4 rounded-lg font-semibold transition-colors"
+                      >
+                        Finish Check-in
+                      </button>
+                    )}
                   </>
                 )}
               </div>
             )}
           </div>
 
-          {/* Right Side: Voice Chat (persists across steps 2 and 3) */}
+          {/* Right Side: Voice Chat (persists across steps 2, 3, and 4) */}
           <div className="flex flex-col">
             <VoiceChat 
+              ref={voiceChatRef}
               patientId="maria_001"
               isActive={chatActive}
               vitalsData={vitalsForChat}
+              onStateChange={handleChatStateChange}
               className="flex-1"
             />
             {step === 2 && (
@@ -463,6 +502,22 @@ export default function CheckInPage() {
                 <p className="text-xs text-blue-300 flex items-center gap-2">
                   <MessageCircle className="w-4 h-4" />
                   Chat with Pulsera while we measure your vitals. Speak or type to share how you're feeling.
+                </p>
+              </div>
+            )}
+            {step === 3 && waitingForChat && (
+              <div className="mt-3 p-3 bg-purple-900/20 rounded-lg">
+                <p className="text-xs text-purple-300 flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Finishing up your conversation before continuing...
+                </p>
+              </div>
+            )}
+            {step === 4 && triageMode && (
+              <div className="mt-3 p-3 bg-green-900/20 rounded-lg">
+                <p className="text-xs text-green-300 flex items-center gap-2">
+                  <MessageCircle className="w-4 h-4" />
+                  Continue chatting about your results. Click "Finish Check-in" when you're ready.
                 </p>
               </div>
             )}

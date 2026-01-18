@@ -246,6 +246,148 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
             del active_chat_sessions[session_id]
 
 
+# ============== WebSocket for Triage Continuation ==============
+
+
+@app.websocket("/ws/triage")
+async def websocket_triage(websocket: WebSocket):
+    """
+    WebSocket endpoint for triage continuation after check-in.
+    
+    Receives vitals and conversation context from check-in to continue
+    the health assessment conversation on the dashboard.
+    
+    Messages from client:
+    - {"type": "init", "vitals": {...}, "conversation_history": [...], "is_normal": bool}
+    - {"type": "text", "text": "message text"}
+    - {"type": "audio", "audio": "base64_audio"}
+    - {"type": "end_session"}
+    
+    Messages to client:
+    - {"type": "greeting", "text": "triage greeting"}
+    - {"type": "response", "text": "AI response"}
+    - {"type": "transcription", "text": "transcribed text"}
+    - {"type": "audio_chunk", "audio": "base64_audio_chunk", "is_final": false}
+    - {"type": "session_end"}
+    - {"type": "error", "message": "error description"}
+    """
+    await websocket.accept()
+    
+    chat_agent = None
+    initialized = False
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+            
+            if msg_type == "init":
+                # Initialize triage with context from check-in
+                vitals = message.get("vitals", {})
+                conversation_history = message.get("conversation_history", [])
+                is_normal = message.get("is_normal", True)
+                
+                # Create chat agent with triage context
+                chat_agent = create_pulse_chat_agent("maria_001")
+                
+                # Build context from check-in conversation
+                context_summary = ""
+                if conversation_history:
+                    # Handle both array of message objects and array-like object with numeric keys
+                    messages_list = conversation_history if isinstance(conversation_history, list) else list(conversation_history.values()) if isinstance(conversation_history, dict) else []
+                    user_messages = []
+                    for m in messages_list:
+                        if isinstance(m, dict) and m.get("role") == "user":
+                            user_messages.append(m.get("content", ""))
+                        elif isinstance(m, str):
+                            user_messages.append(m)
+                    if user_messages:
+                        context_summary = f"During check-in, patient shared: {'; '.join(user_messages[:3])}"
+                
+                # Generate appropriate triage greeting based on vitals
+                hr = vitals.get("heart_rate", 0)
+                hrv = vitals.get("hrv", 0)
+                
+                if is_normal:
+                    # Path A: Normal vitals - reinforcement and lifestyle coaching
+                    greeting = (
+                        f"Your vitals from the check-in look great - heart rate at {hr} bpm "
+                        f"and HRV at {round(hrv)} ms are well within healthy ranges. "
+                        f"This is wonderful to see! {context_summary + ' ' if context_summary else ''}"
+                        f"I'd love to hear more about what's been working well for you. "
+                        f"Have you made any changes to your routine recently, or is there anything "
+                        f"you'd like to discuss about maintaining your heart health?"
+                    )
+                else:
+                    # Path B: Abnormal vitals - investigation and support
+                    concerns = []
+                    if hr > 85:
+                        concerns.append(f"your heart rate is a bit elevated at {hr} bpm")
+                    if hr < 60:
+                        concerns.append(f"your heart rate is lower than usual at {hr} bpm")
+                    if hrv < 35:
+                        concerns.append(f"your HRV at {round(hrv)} ms suggests some stress on your system")
+                    
+                    concern_text = " and ".join(concerns) if concerns else "some of your readings need attention"
+                    
+                    greeting = (
+                        f"I've reviewed your check-in results, and I noticed {concern_text}. "
+                        f"{context_summary + ' ' if context_summary else ''}"
+                        f"This doesn't mean something is wrong, but I'd like to understand better. "
+                        f"How have you been feeling today? Have you noticed anything different - "
+                        f"maybe stress, sleep changes, or any unusual symptoms?"
+                    )
+                
+                initialized = True
+                await websocket.send_json({"type": "greeting", "text": greeting})
+                await stream_tts_to_websocket(websocket, greeting)
+                
+            elif msg_type == "text" and initialized and chat_agent:
+                # Process text message
+                text = message.get("text", "")
+                if text:
+                    result = chat_agent.process_message(text)
+                    response = result.get("response", "I understand. Tell me more.")
+                    await websocket.send_json({"type": "response", "text": response})
+                    await stream_tts_to_websocket(websocket, response)
+                    
+            elif msg_type == "audio" and initialized and chat_agent:
+                # Process audio message
+                audio_data = message.get("audio", "")
+                if audio_data:
+                    # Transcribe
+                    transcript = await transcribe_base64(audio_data)
+                    if transcript:
+                        await websocket.send_json({"type": "transcription", "text": transcript})
+                        # Process transcribed text
+                        result = chat_agent.process_message(transcript)
+                        response = result.get("response", "I understand. Tell me more.")
+                        await websocket.send_json({"type": "response", "text": response})
+                        await stream_tts_to_websocket(websocket, response)
+                    else:
+                        await websocket.send_json({"type": "error", "message": "Could not transcribe audio"})
+                        
+            elif msg_type == "end_session":
+                await websocket.send_json({"type": "session_end"})
+                break
+                
+            else:
+                if not initialized:
+                    await websocket.send_json({"type": "error", "message": "Session not initialized. Send init message first."})
+                else:
+                    await websocket.send_json({"type": "error", "message": f"Unknown message type: {msg_type}"})
+                    
+    except WebSocketDisconnect:
+        print("Triage WebSocket disconnected")
+    except Exception as e:
+        print(f"Triage WebSocket error: {str(e)}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+
+
 # ============== REST Endpoints for Chat ==============
 
 

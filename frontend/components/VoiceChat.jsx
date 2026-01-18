@@ -1,20 +1,22 @@
 'use client';
 
 import { Loader2, MessageCircle, Mic, MicOff, Send, Volume2, VolumeX } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 
 /**
  * VoiceChat Component
  * 
- * Real-time voice chat interface for Pulse health companion.
+ * Real-time voice chat interface for Pulsera health companion.
  * Uses WebSocket for communication and browser MediaRecorder for voice capture.
  */
-export default function VoiceChat({ 
+const VoiceChat = forwardRef(function VoiceChat({ 
   patientId = 'maria_001',
-  vitalsData = null,     // Pass in vitals data when measurement complete
+  vitalsData = null,     // Pass in vitals data when measurement complete (no longer used for auto-response)
   isActive = true,       // Whether chat should be active
+  onStateChange = null,  // Callback: ({isSpeaking, isRecording, isProcessing}) => void
+  onSessionEnd = null,   // Callback: (sessionSummary) => void - called when session ends
   className = ''
-}) {
+}, ref) {
   // WebSocket and connection state
   const wsRef = useRef(null);
   const [connected, setConnected] = useState(false);
@@ -40,6 +42,13 @@ export default function VoiceChat({
   
   // Auto-scroll ref
   const messagesEndRef = useRef(null);
+
+  // Notify parent of state changes
+  useEffect(() => {
+    if (onStateChange) {
+      onStateChange({ isSpeaking, isRecording, isProcessing });
+    }
+  }, [isSpeaking, isRecording, isProcessing, onStateChange]);
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -311,10 +320,10 @@ export default function VoiceChat({
     };
   }, [isActive, connectChat]);
 
-  // Send vital results when they come in
+  // Send vitals to trigger triage response when vitalsData changes
   useEffect(() => {
     if (vitalsData && wsRef.current?.readyState === WebSocket.OPEN) {
-      const isNormal = vitalsData.heart_rate >= 60 && vitalsData.heart_rate <= 100;
+      const isNormal = vitalsData.heart_rate >= 60 && vitalsData.heart_rate <= 85 && vitalsData.hrv >= 35;
       wsRef.current.send(JSON.stringify({
         type: 'vital_result',
         heart_rate: vitalsData.heart_rate,
@@ -323,6 +332,59 @@ export default function VoiceChat({
       }));
     }
   }, [vitalsData]);
+
+  // End session and get summary - call this before unmounting to get conversation data
+  const endSession = useCallback(() => {
+    return new Promise((resolve) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        // Set up one-time handler for session_summary
+        const handleSummary = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'session_summary') {
+              wsRef.current.removeEventListener('message', handleSummary);
+              const summary = {
+                ...data.data,
+                messages: messages  // Include frontend messages too
+              };
+              if (onSessionEnd) {
+                onSessionEnd(summary);
+              }
+              resolve(summary);
+            }
+          } catch (e) {
+            console.error('Error parsing session summary:', e);
+          }
+        };
+        
+        wsRef.current.addEventListener('message', handleSummary);
+        wsRef.current.send(JSON.stringify({ type: 'end_session' }));
+        
+        // Timeout fallback
+        setTimeout(() => {
+          wsRef.current?.removeEventListener('message', handleSummary);
+          const fallbackSummary = { messages, subjective_summary: 'Session ended' };
+          if (onSessionEnd) {
+            onSessionEnd(fallbackSummary);
+          }
+          resolve(fallbackSummary);
+        }, 3000);
+      } else {
+        const fallbackSummary = { messages, subjective_summary: 'No active session' };
+        if (onSessionEnd) {
+          onSessionEnd(fallbackSummary);
+        }
+        resolve(fallbackSummary);
+      }
+    });
+  }, [messages, onSessionEnd]);
+
+  // Expose methods via ref for parent components
+  useImperativeHandle(ref, () => ({
+    endSession,
+    getMessages: () => messages,
+    isIdle: () => !isSpeaking && !isRecording && !isProcessing
+  }), [endSession, messages, isSpeaking, isRecording, isProcessing]);
 
   // Request microphone permission
   const requestMicPermission = useCallback(async () => {
@@ -593,4 +655,6 @@ export default function VoiceChat({
       </div>
     </div>
   );
-}
+});
+
+export default VoiceChat;
