@@ -1,6 +1,6 @@
 'use client';
 
-import { Loader2, MessageCircle, Mic, MicOff, Send, Volume2 } from 'lucide-react';
+import { Loader2, MessageCircle, Mic, MicOff, Send, Volume2, VolumeX } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
@@ -26,6 +26,12 @@ export default function VoiceChat({
   const [isRecording, setIsRecording] = useState(false);
   const [hasPermission, setHasPermission] = useState(null);
   
+  // Audio playback state (TTS)
+  const audioRef = useRef(null);
+  const audioChunksBufferRef = useRef([]);  // Buffer to accumulate streaming chunks
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  
   // Chat state
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
@@ -39,6 +45,114 @@ export default function VoiceChat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Initialize Audio element
+  useEffect(() => {
+    audioRef.current = new Audio();
+    audioRef.current.onplay = () => setIsSpeaking(true);
+    audioRef.current.onended = () => setIsSpeaking(false);
+    audioRef.current.onerror = (e) => {
+      console.error('Audio playback error:', e);
+      setIsSpeaking(false);
+    };
+    
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+      }
+    };
+  }, []);
+
+  // Helper to decode base64 to Uint8Array
+  const base64ToBytes = useCallback((base64) => {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  }, []);
+
+  // Play accumulated audio chunks
+  const playAccumulatedAudio = useCallback(() => {
+    if (isMuted || audioChunksBufferRef.current.length === 0) {
+      audioChunksBufferRef.current = [];
+      return;
+    }
+    
+    try {
+      // Combine all chunks into one Uint8Array
+      const totalLength = audioChunksBufferRef.current.reduce((acc, chunk) => acc + chunk.length, 0);
+      const combined = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of audioChunksBufferRef.current) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      // Clear the buffer
+      audioChunksBufferRef.current = [];
+      
+      // Create blob and play
+      const blob = new Blob([combined], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      
+      // Revoke previous URL if exists
+      if (audioRef.current.src && audioRef.current.src.startsWith('blob:')) {
+        URL.revokeObjectURL(audioRef.current.src);
+      }
+      
+      audioRef.current.src = url;
+      audioRef.current.play().catch(err => {
+        console.error('Error playing audio:', err);
+        setIsSpeaking(false);
+      });
+    } catch (err) {
+      console.error('Error processing audio:', err);
+      audioChunksBufferRef.current = [];
+      setIsSpeaking(false);
+    }
+  }, [isMuted]);
+
+  // Queue audio chunk - accumulates until final chunk received
+  const queueAudioChunk = useCallback((base64Audio, isFinal) => {
+    if (isMuted) {
+      if (isFinal) audioChunksBufferRef.current = [];
+      return;
+    }
+    
+    if (base64Audio) {
+      const bytes = base64ToBytes(base64Audio);
+      audioChunksBufferRef.current.push(bytes);
+    }
+    
+    // Play when we receive the final chunk
+    if (isFinal) {
+      playAccumulatedAudio();
+    }
+  }, [isMuted, base64ToBytes, playAccumulatedAudio]);
+
+  // Stop current audio playback
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    audioChunksBufferRef.current = [];
+    setIsSpeaking(false);
+  }, []);
+
+  // Toggle mute
+  const toggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      if (!prev) {
+        // Muting - stop current audio
+        stopAudio();
+      }
+      return !prev;
+    });
+  }, [stopAudio]);
 
   // Handle incoming WebSocket messages - define first to avoid hoisting issues
   const handleMessage = useCallback((data) => {
@@ -86,6 +200,16 @@ export default function VoiceChat({
         console.log('Session summary:', data.data);
         break;
       
+      case 'audio_chunk':
+        // Queue audio for playback - accumulate chunks until final
+        queueAudioChunk(data.audio, data.is_final);
+        break;
+      
+      case 'tts_error':
+        // TTS failed but don't show error to user - text is already displayed
+        console.warn('TTS unavailable:', data.message);
+        break;
+      
       case 'error':
         console.error('Chat error:', data.message);
         setMessages(prev => [...prev, {
@@ -99,7 +223,7 @@ export default function VoiceChat({
       default:
         console.log('Unknown message type:', data.type);
     }
-  }, []);
+  }, [queueAudioChunk]);
 
   // Track if connection ever succeeded (to distinguish failed connect vs disconnect)
   const hadConnectionRef = useRef(false);
@@ -117,7 +241,7 @@ export default function VoiceChat({
       if (!hadConnectionRef.current) {
         setMessages(prev => [...prev, {
           role: 'system',
-          content: 'Unable to connect to Pulse AI. Please ensure the backend server is running.',
+          content: 'Unable to connect to Pulsera AI. Please ensure the backend server is running.',
           timestamp: new Date().toISOString(),
           isError: true
         }]);
@@ -313,20 +437,39 @@ export default function VoiceChat({
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
         <div className="flex items-center gap-2">
           <MessageCircle className="w-5 h-5 text-blue-400" />
-          <span className="font-medium text-gray-200">Pulse AI</span>
+          <span className="font-medium text-gray-200">Pulsera AI</span>
           {connected && (
             <span className="flex items-center gap-1 text-xs text-green-400">
               <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
               Connected
             </span>
           )}
+          {isSpeaking && (
+            <span className="flex items-center gap-1 text-xs text-purple-400">
+              <Volume2 className="w-3 h-3 animate-pulse" />
+              Speaking
+            </span>
+          )}
         </div>
-        <button
-          onClick={() => setShowTextInput(!showTextInput)}
-          className="text-xs text-gray-400 hover:text-white transition-colors"
-        >
-          {showTextInput ? 'Hide keyboard' : 'Use keyboard'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={toggleMute}
+            className={`p-1.5 rounded-lg transition-colors ${
+              isMuted 
+                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' 
+                : 'text-gray-400 hover:text-white hover:bg-gray-700'
+            }`}
+            title={isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
+          >
+            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </button>
+          <button
+            onClick={() => setShowTextInput(!showTextInput)}
+            className="text-xs text-gray-400 hover:text-white transition-colors"
+          >
+            {showTextInput ? 'Hide keyboard' : 'Use keyboard'}
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
@@ -334,7 +477,7 @@ export default function VoiceChat({
         {messages.length === 0 && !connecting && (
           <div className="text-center text-gray-500 py-8">
             <Volume2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
-            <p className="text-sm">Connecting to Pulse AI...</p>
+            <p className="text-sm">Connecting to Pulsera AI...</p>
           </div>
         )}
         

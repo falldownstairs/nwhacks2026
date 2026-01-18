@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from agents import (create_pulse_chat_agent, run_agent_analysis,
                     transcribe_base64)
+from agents.text_to_speech import synthesize_speech_streaming
 from camera_stream import camera_websocket_endpoint
 from database import patients, vitals
 from db_helpers import (calculate_stats, get_all_vitals, get_baseline,
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 try:
     import uvloop
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     if sys.platform.startswith("win"):
@@ -34,146 +36,208 @@ app.add_middleware(
 # Store active chat sessions
 active_chat_sessions: Dict[str, Any] = {}
 
+
+# ============== TTS Helper ==============
+
+
+async def stream_tts_to_websocket(websocket: WebSocket, text: str):
+    """
+    Stream TTS audio chunks to the WebSocket client.
+    Sends audio in chunks for real-time playback.
+    """
+    import base64
+    import os
+
+    # Skip TTS if no API key configured
+    if not os.getenv("ELEVENLABS_API_KEY"):
+        print("Warning: ELEVENLABS_API_KEY not set, skipping TTS")
+        return
+
+    try:
+        chunk_buffer = b""
+        chunk_count = 0
+
+        async for audio_chunk in synthesize_speech_streaming(text):
+            chunk_buffer += audio_chunk
+            # Send chunks of ~8KB for smooth streaming
+            if len(chunk_buffer) >= 8192:
+                await websocket.send_json(
+                    {
+                        "type": "audio_chunk",
+                        "audio": base64.b64encode(chunk_buffer).decode("utf-8"),
+                        "is_final": False,
+                    }
+                )
+                chunk_buffer = b""
+                chunk_count += 1
+
+        # Send any remaining audio as final chunk
+        if chunk_buffer:
+            await websocket.send_json(
+                {
+                    "type": "audio_chunk",
+                    "audio": base64.b64encode(chunk_buffer).decode("utf-8"),
+                    "is_final": True,
+                }
+            )
+        elif chunk_count > 0:
+            # If we sent chunks but buffer is empty, send empty final signal
+            await websocket.send_json(
+                {"type": "audio_chunk", "audio": "", "is_final": True}
+            )
+
+    except Exception as e:
+        print(f"TTS streaming error: {str(e)}")
+        # Don't fail the whole request if TTS fails
+        await websocket.send_json(
+            {"type": "tts_error", "message": f"Text-to-speech unavailable: {str(e)}"}
+        )
+
+
 # ============== WebSocket for Camera ==============
+
 
 @app.websocket("/ws/camera")
 async def websocket_camera(websocket: WebSocket):
     """WebSocket endpoint for real-time camera heart rate monitoring"""
     await camera_websocket_endpoint(websocket)
 
+
 # ============== WebSocket for Voice Chat ==============
+
 
 @app.websocket("/ws/chat/{patient_id}")
 async def websocket_chat(websocket: WebSocket, patient_id: str):
     """
     WebSocket endpoint for real-time voice chat during health check-ins.
-    
+
     Messages from client:
     - {"type": "text", "content": "message text"}
     - {"type": "audio", "data": "base64_audio", "format": "webm"}
     - {"type": "get_greeting"}
     - {"type": "vital_result", "heart_rate": 72, "hrv": 45, "is_normal": true}
     - {"type": "end_session"}
-    
+
     Messages to client:
     - {"type": "greeting", "content": "Hello!"}
     - {"type": "response", "content": "AI response", "context": "extracted context"}
     - {"type": "transcription", "text": "transcribed text"}
     - {"type": "vital_response", "content": "Your vitals look great!"}
+    - {"type": "audio_chunk", "audio": "base64_audio_chunk", "is_final": false}
     - {"type": "session_summary", "data": {...}}
     - {"type": "error", "message": "error description"}
     """
     await websocket.accept()
-    
+
     # Create chat agent for this session
     try:
         chat_agent = create_pulse_chat_agent(patient_id)
         session_id = f"{patient_id}_{datetime.utcnow().timestamp()}"
         active_chat_sessions[session_id] = chat_agent
     except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "message": f"Failed to initialize chat agent: {str(e)}"
-        })
+        await websocket.send_json(
+            {"type": "error", "message": f"Failed to initialize chat agent: {str(e)}"}
+        )
         await websocket.close()
         return
-    
+
     try:
         while True:
             # Receive message
             data = await websocket.receive_text()
             message = json.loads(data)
             msg_type = message.get("type")
-            
+
             if msg_type == "get_greeting":
                 # Send initial greeting
                 greeting = chat_agent.get_greeting()
-                await websocket.send_json({
-                    "type": "greeting",
-                    "content": greeting
-                })
-            
+                await websocket.send_json({"type": "greeting", "content": greeting})
+                # Stream TTS audio for greeting
+                await stream_tts_to_websocket(websocket, greeting)
+
             elif msg_type == "text":
                 # Process text message
                 content = message.get("content", "")
                 if content:
                     result = chat_agent.process_message(content)
-                    await websocket.send_json({
-                        "type": "response",
-                        "content": result["response"],
-                        "context": result.get("context_extracted", "")
-                    })
-            
+                    await websocket.send_json(
+                        {
+                            "type": "response",
+                            "content": result["response"],
+                            "context": result.get("context_extracted", ""),
+                        }
+                    )
+                    # Stream TTS audio for response
+                    await stream_tts_to_websocket(websocket, result["response"])
+
             elif msg_type == "audio":
                 # Transcribe audio and then process
                 audio_data = message.get("data", "")
                 audio_format = message.get("format", "webm")
-                
+
                 if audio_data:
                     # Transcribe using Groq
-                    transcription = await transcribe_base64(
-                        audio_data, 
-                        audio_format
-                    )
-                    
+                    transcription = await transcribe_base64(audio_data, audio_format)
+
                     if transcription["success"] and transcription["text"]:
                         # Send transcription first
-                        await websocket.send_json({
-                            "type": "transcription",
-                            "text": transcription["text"]
-                        })
-                        
+                        await websocket.send_json(
+                            {"type": "transcription", "text": transcription["text"]}
+                        )
+
                         # Then process with chat agent
                         result = chat_agent.process_message(transcription["text"])
-                        await websocket.send_json({
-                            "type": "response",
-                            "content": result["response"],
-                            "context": result.get("context_extracted", "")
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "response",
+                                "content": result["response"],
+                                "context": result.get("context_extracted", ""),
+                            }
+                        )
+                        # Stream TTS audio for response
+                        await stream_tts_to_websocket(websocket, result["response"])
                     else:
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": transcription.get("error", "Transcription failed")
-                        })
-            
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": transcription.get(
+                                    "error", "Transcription failed"
+                                ),
+                            }
+                        )
+
             elif msg_type == "vital_result":
                 # Generate response to vital measurement
                 heart_rate = message.get("heart_rate", 0)
                 hrv = message.get("hrv", 0)
                 is_normal = message.get("is_normal", True)
-                
+
                 vital_response = chat_agent.get_vital_response(
                     heart_rate, hrv, is_normal
                 )
-                await websocket.send_json({
-                    "type": "vital_response",
-                    "content": vital_response
-                })
-            
+                await websocket.send_json(
+                    {"type": "vital_response", "content": vital_response}
+                )
+                # Stream TTS audio for vital response
+                await stream_tts_to_websocket(websocket, vital_response)
+
             elif msg_type == "end_session":
                 # End the session and return summary
                 summary = chat_agent.get_session_summary()
-                await websocket.send_json({
-                    "type": "session_summary",
-                    "data": summary
-                })
+                await websocket.send_json({"type": "session_summary", "data": summary})
                 break
-            
+
             else:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": f"Unknown message type: {msg_type}"
-                })
-    
+                await websocket.send_json(
+                    {"type": "error", "message": f"Unknown message type: {msg_type}"}
+                )
+
     except WebSocketDisconnect:
         print(f"Chat WebSocket disconnected for patient {patient_id}")
     except Exception as e:
         print(f"Chat WebSocket error: {str(e)}")
         try:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e)
-            })
+            await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
     finally:
@@ -181,17 +245,21 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
         if session_id in active_chat_sessions:
             del active_chat_sessions[session_id]
 
+
 # ============== REST Endpoints for Chat ==============
+
 
 class ChatMessageRequest(BaseModel):
     patient_id: str
     message: str
     session_id: Optional[str] = None
 
+
 class AudioTranscribeRequest(BaseModel):
     audio_base64: str
     format: str = "webm"
     language: str = "en"
+
 
 @app.post("/chat/message")
 async def chat_message(request: ChatMessageRequest):
@@ -201,21 +269,22 @@ async def chat_message(request: ChatMessageRequest):
     """
     try:
         chat_agent = create_pulse_chat_agent(request.patient_id)
-        
+
         # If no greeting has been sent, get one first
         greeting = chat_agent.get_greeting()
-        
+
         # Process the message
         result = chat_agent.process_message(request.message)
-        
+
         return {
             "success": True,
             "greeting": greeting,
             "response": result["response"],
-            "context_extracted": result.get("context_extracted", "")
+            "context_extracted": result.get("context_extracted", ""),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/chat/transcribe")
 async def transcribe_audio_endpoint(request: AudioTranscribeRequest):
@@ -224,28 +293,27 @@ async def transcribe_audio_endpoint(request: AudioTranscribeRequest):
     """
     try:
         result = await transcribe_base64(
-            request.audio_base64,
-            request.format,
-            request.language
+            request.audio_base64, request.format, request.language
         )
-        
+
         if result["success"]:
             return {
                 "success": True,
                 "text": result["text"],
-                "language": result.get("language", "en")
+                "language": result.get("language", "en"),
             }
         else:
             raise HTTPException(
-                status_code=400, 
-                detail=result.get("error", "Transcription failed")
+                status_code=400, detail=result.get("error", "Transcription failed")
             )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ============== Pydantic Models ==============
+
 
 class PatientCreate(BaseModel):
     patient_id: str
@@ -255,6 +323,7 @@ class PatientCreate(BaseModel):
     baseline_heart_rate: Optional[float] = None
     baseline_hrv: Optional[float] = None
 
+
 class PatientUpdate(BaseModel):
     name: Optional[str] = None
     age: Optional[int] = None
@@ -262,11 +331,13 @@ class PatientUpdate(BaseModel):
     baseline_heart_rate: Optional[float] = None
     baseline_hrv: Optional[float] = None
 
+
 class VitalCreate(BaseModel):
     patient_id: str
     heart_rate: float
     hrv: float
     quality_score: float = 0.9
+
 
 class AlertThresholds(BaseModel):
     hr_high: float = 100
@@ -275,17 +346,21 @@ class AlertThresholds(BaseModel):
     hr_change_percent: float = 20  # % change from baseline
     hrv_change_percent: float = 30
 
+
 class VitalAnalyzeRequest(BaseModel):
     patient_id: str
     heart_rate: float
     hrv: float
     quality_score: float = 0.9
 
+
 # ============== Health Check ==============
+
 
 @app.get("/")
 def read_root():
     return {"status": "healthy", "service": "Chronic Disease MVP API"}
+
 
 @app.get("/health")
 def health_check():
@@ -296,7 +371,9 @@ def health_check():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database error: {str(e)}")
 
+
 # ============== Patient CRUD ==============
+
 
 @app.post("/patients", status_code=201)
 def create_patient(patient: PatientCreate):
@@ -304,7 +381,7 @@ def create_patient(patient: PatientCreate):
     # Check if patient already exists
     if patients.find_one({"_id": patient.patient_id}):
         raise HTTPException(status_code=400, detail="Patient ID already exists")
-    
+
     patient_doc = {
         "_id": patient.patient_id,
         "name": patient.name,
@@ -312,13 +389,14 @@ def create_patient(patient: PatientCreate):
         "conditions": patient.conditions,
         "baseline": {
             "heart_rate": patient.baseline_heart_rate,
-            "hrv": patient.baseline_hrv
+            "hrv": patient.baseline_hrv,
         },
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
     }
-    
+
     patients.insert_one(patient_doc)
     return {"message": "Patient created", "patient_id": patient.patient_id}
+
 
 @app.get("/patients")
 def list_patients():
@@ -329,15 +407,17 @@ def list_patients():
         p["patient_id"] = p.pop("_id")
     return {"patients": all_patients, "count": len(all_patients)}
 
+
 @app.get("/patients/{patient_id}")
 def get_patient_by_id(patient_id: str):
     """Get a single patient by ID"""
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     patient["patient_id"] = patient.pop("_id")
     return patient
+
 
 @app.put("/patients/{patient_id}")
 def update_patient(patient_id: str, update: PatientUpdate):
@@ -345,7 +425,7 @@ def update_patient(patient_id: str, update: PatientUpdate):
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     update_doc = {}
     if update.name is not None:
         update_doc["name"] = update.name
@@ -357,12 +437,13 @@ def update_patient(patient_id: str, update: PatientUpdate):
         update_doc["baseline.heart_rate"] = update.baseline_heart_rate
     if update.baseline_hrv is not None:
         update_doc["baseline.hrv"] = update.baseline_hrv
-    
+
     if update_doc:
         update_doc["updated_at"] = datetime.utcnow()
         patients.update_one({"_id": patient_id}, {"$set": update_doc})
-    
+
     return {"message": "Patient updated", "patient_id": patient_id}
+
 
 @app.delete("/patients/{patient_id}")
 def delete_patient(patient_id: str):
@@ -370,18 +451,20 @@ def delete_patient(patient_id: str):
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     # Delete patient and their vitals
     patients.delete_one({"_id": patient_id})
     vitals_deleted = vitals.delete_many({"patient_id": patient_id})
-    
+
     return {
         "message": "Patient deleted",
         "patient_id": patient_id,
-        "vitals_deleted": vitals_deleted.deleted_count
+        "vitals_deleted": vitals_deleted.deleted_count,
     }
 
+
 # ============== Vitals Endpoints ==============
+
 
 @app.post("/vitals", status_code=201)
 def create_vital(vital: VitalCreate):
@@ -389,64 +472,58 @@ def create_vital(vital: VitalCreate):
     # Verify patient exists
     if not get_patient(vital.patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     vital_id = store_new_vital(
-        vital.patient_id,
-        vital.heart_rate,
-        vital.hrv,
-        vital.quality_score
+        vital.patient_id, vital.heart_rate, vital.hrv, vital.quality_score
     )
-    
+
     # Check for alerts
     alerts = check_vital_alerts(vital.patient_id, vital.heart_rate, vital.hrv)
-    
-    return {
-        "message": "Vital recorded",
-        "vital_id": vital_id,
-        "alerts": alerts
-    }
+
+    return {"message": "Vital recorded", "vital_id": vital_id, "alerts": alerts}
+
 
 @app.get("/vitals/{patient_id}")
 def get_vitals(patient_id: str, days: Optional[int] = None):
     """Get vitals for a patient. If days specified, returns recent; otherwise all."""
     if not get_patient(patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     if days:
         vital_list = get_recent_vitals(patient_id, days)
     else:
         vital_list = get_all_vitals(patient_id)
-    
+
     # Convert ObjectId to string
     for v in vital_list:
         v["_id"] = str(v["_id"])
-    
+
     return {"patient_id": patient_id, "vitals": vital_list, "count": len(vital_list)}
+
 
 @app.get("/vitals/{patient_id}/latest")
 def get_latest_vital(patient_id: str):
     """Get the most recent vital reading"""
     if not get_patient(patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
-    latest = vitals.find_one(
-        {"patient_id": patient_id},
-        sort=[("timestamp", -1)]
-    )
-    
+
+    latest = vitals.find_one({"patient_id": patient_id}, sort=[("timestamp", -1)])
+
     if not latest:
         raise HTTPException(status_code=404, detail="No vitals found")
-    
+
     latest["_id"] = str(latest["_id"])
     return latest
 
+
 # ============== AI Agent Analysis Endpoint ==============
+
 
 @app.post("/vitals/analyze")
 def analyze_vitals(request: VitalAnalyzeRequest):
     """
     Store vitals and run AI agent analysis for decompensation detection.
-    
+
     This endpoint:
     1. Stores the new vital measurement
     2. Runs the 3-agent AI analysis workflow:
@@ -458,22 +535,19 @@ def analyze_vitals(request: VitalAnalyzeRequest):
     # Verify patient exists
     if not get_patient(request.patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     # Store the vital first
     vital_id = store_new_vital(
-        request.patient_id,
-        request.heart_rate,
-        request.hrv,
-        request.quality_score
+        request.patient_id, request.heart_rate, request.hrv, request.quality_score
     )
-    
+
     # Run AI agent analysis
     try:
         analysis = run_agent_analysis(
             patient_id=request.patient_id,
             heart_rate=request.heart_rate,
             hrv=request.hrv,
-            quality_score=request.quality_score
+            quality_score=request.quality_score,
         )
     except Exception as e:
         # Return partial response if AI analysis fails
@@ -485,13 +559,16 @@ def analyze_vitals(request: VitalAnalyzeRequest):
                 "score": 0,
                 "level": "UNKNOWN",
                 "clinical_reasoning": "AI analysis unavailable",
-                "recommended_actions": ["Continue monitoring", "Contact provider if concerned"]
+                "recommended_actions": [
+                    "Continue monitoring",
+                    "Contact provider if concerned",
+                ],
             },
             "patient_explanation": "Your vitals have been recorded. Please continue your regular monitoring.",
             "agent_steps": [],
-            "alerts": [f"AI analysis failed: {str(e)}"]
+            "alerts": [f"AI analysis failed: {str(e)}"],
         }
-    
+
     # Return complete response
     return {
         "vital_id": vital_id,
@@ -503,48 +580,56 @@ def analyze_vitals(request: VitalAnalyzeRequest):
         "patient_explanation": analysis.get("patient_explanation"),
         "agent_steps": analysis.get("agent_steps", []),
         "alerts": analysis.get("alerts", []),
-        "errors": analysis.get("errors", [])
+        "errors": analysis.get("errors", []),
     }
 
+
 # ============== Analytics Endpoints ==============
+
 
 @app.get("/analytics/{patient_id}/stats")
 def get_patient_stats(patient_id: str, days: int = 7):
     """Get statistical summary of recent vitals"""
     if not get_patient(patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     stats = calculate_stats(patient_id, days)
     if not stats:
         raise HTTPException(status_code=404, detail="No vitals data for analysis")
-    
+
     return {"patient_id": patient_id, "days": days, "stats": stats}
+
 
 @app.get("/analytics/{patient_id}/trends")
 def get_trends(patient_id: str, days: int = 7):
     """Analyze trends in vitals - detecting improvement or decline"""
     if not get_patient(patient_id):
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     recent = get_recent_vitals(patient_id, days)
     if len(recent) < 3:
-        raise HTTPException(status_code=400, detail="Not enough data for trend analysis (need at least 3 readings)")
-    
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough data for trend analysis (need at least 3 readings)",
+        )
+
     # Calculate trend using simple linear regression slope
     hr_values = [v["heart_rate"] for v in recent]
     hrv_values = [v["hrv"] for v in recent]
-    
+
     hr_trend = calculate_trend(hr_values)
     hrv_trend = calculate_trend(hrv_values)
-    
+
     # Determine status
     status = "stable"
     concerns = []
-    
+
     # Rising HR + Falling HRV = potential decompensation
     if hr_trend > 2 and hrv_trend < -2:
         status = "declining"
-        concerns.append("Heart rate rising while HRV declining - possible decompensation")
+        concerns.append(
+            "Heart rate rising while HRV declining - possible decompensation"
+        )
     elif hr_trend > 3:
         status = "concerning"
         concerns.append("Heart rate trending upward")
@@ -553,24 +638,33 @@ def get_trends(patient_id: str, days: int = 7):
         concerns.append("HRV trending downward")
     elif hr_trend < -2 and hrv_trend > 2:
         status = "improving"
-    
+
     return {
         "patient_id": patient_id,
         "days": days,
         "readings_analyzed": len(recent),
         "trends": {
             "heart_rate": {
-                "direction": "rising" if hr_trend > 1 else "falling" if hr_trend < -1 else "stable",
-                "slope": round(hr_trend, 2)
+                "direction": "rising"
+                if hr_trend > 1
+                else "falling"
+                if hr_trend < -1
+                else "stable",
+                "slope": round(hr_trend, 2),
             },
             "hrv": {
-                "direction": "rising" if hrv_trend > 1 else "falling" if hrv_trend < -1 else "stable",
-                "slope": round(hrv_trend, 2)
-            }
+                "direction": "rising"
+                if hrv_trend > 1
+                else "falling"
+                if hrv_trend < -1
+                else "stable",
+                "slope": round(hrv_trend, 2),
+            },
         },
         "status": status,
-        "concerns": concerns
+        "concerns": concerns,
     }
+
 
 @app.get("/analytics/{patient_id}/alerts")
 def get_alerts(patient_id: str):
@@ -578,25 +672,23 @@ def get_alerts(patient_id: str):
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    
-    latest = vitals.find_one(
-        {"patient_id": patient_id},
-        sort=[("timestamp", -1)]
-    )
-    
+
+    latest = vitals.find_one({"patient_id": patient_id}, sort=[("timestamp", -1)])
+
     if not latest:
         return {"patient_id": patient_id, "alerts": [], "status": "no_data"}
-    
+
     alerts = check_vital_alerts(patient_id, latest["heart_rate"], latest["hrv"])
-    
+
     return {
         "patient_id": patient_id,
         "timestamp": latest["timestamp"],
         "current_hr": latest["heart_rate"],
         "current_hrv": latest["hrv"],
         "alerts": alerts,
-        "alert_count": len(alerts)
+        "alert_count": len(alerts),
     }
+
 
 @app.get("/analytics/{patient_id}/baseline-comparison")
 def compare_to_baseline(patient_id: str):
@@ -604,99 +696,135 @@ def compare_to_baseline(patient_id: str):
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     baseline = patient.get("baseline", {})
     if not baseline.get("heart_rate") or not baseline.get("hrv"):
-        raise HTTPException(status_code=400, detail="No baseline established for patient")
-    
+        raise HTTPException(
+            status_code=400, detail="No baseline established for patient"
+        )
+
     # Get recent stats (last 3 days)
     stats = calculate_stats(patient_id, days=3)
     if not stats:
         raise HTTPException(status_code=404, detail="No recent vitals for comparison")
-    
+
     hr_diff = stats["avg_hr"] - baseline["heart_rate"]
     hrv_diff = stats["avg_hrv"] - baseline["hrv"]
     hr_pct = (hr_diff / baseline["heart_rate"]) * 100
     hrv_pct = (hrv_diff / baseline["hrv"]) * 100
-    
+
     return {
         "patient_id": patient_id,
         "baseline": baseline,
         "current_avg": {
             "heart_rate": round(stats["avg_hr"], 1),
-            "hrv": round(stats["avg_hrv"], 1)
+            "hrv": round(stats["avg_hrv"], 1),
         },
         "deviation": {
-            "heart_rate": {
-                "absolute": round(hr_diff, 1),
-                "percent": round(hr_pct, 1)
-            },
-            "hrv": {
-                "absolute": round(hrv_diff, 1),
-                "percent": round(hrv_pct, 1)
-            }
+            "heart_rate": {"absolute": round(hr_diff, 1), "percent": round(hr_pct, 1)},
+            "hrv": {"absolute": round(hrv_diff, 1), "percent": round(hrv_pct, 1)},
         },
-        "assessment": get_assessment(hr_pct, hrv_pct)
+        "assessment": get_assessment(hr_pct, hrv_pct),
     }
 
+
 # ============== Helper Functions ==============
+
 
 def calculate_trend(values: List[float]) -> float:
     """Calculate linear regression slope (change per reading)"""
     n = len(values)
     if n < 2:
         return 0.0
-    
+
     x_mean = (n - 1) / 2
     y_mean = sum(values) / n
-    
+
     numerator = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
     denominator = sum((i - x_mean) ** 2 for i in range(n))
-    
+
     if denominator == 0:
         return 0.0
-    
+
     return numerator / denominator
+
 
 def check_vital_alerts(patient_id: str, heart_rate: float, hrv: float) -> List[dict]:
     """Check vitals against thresholds and baseline"""
     alerts = []
-    
+
     # Absolute thresholds
     if heart_rate > 100:
-        alerts.append({"type": "high_hr", "severity": "warning", "message": f"Heart rate elevated: {heart_rate} bpm"})
+        alerts.append(
+            {
+                "type": "high_hr",
+                "severity": "warning",
+                "message": f"Heart rate elevated: {heart_rate} bpm",
+            }
+        )
     elif heart_rate > 120:
-        alerts.append({"type": "high_hr", "severity": "critical", "message": f"Heart rate critically high: {heart_rate} bpm"})
-    
+        alerts.append(
+            {
+                "type": "high_hr",
+                "severity": "critical",
+                "message": f"Heart rate critically high: {heart_rate} bpm",
+            }
+        )
+
     if heart_rate < 50:
-        alerts.append({"type": "low_hr", "severity": "warning", "message": f"Heart rate low: {heart_rate} bpm"})
-    
+        alerts.append(
+            {
+                "type": "low_hr",
+                "severity": "warning",
+                "message": f"Heart rate low: {heart_rate} bpm",
+            }
+        )
+
     if hrv < 20:
-        alerts.append({"type": "low_hrv", "severity": "warning", "message": f"HRV critically low: {hrv} ms"})
+        alerts.append(
+            {
+                "type": "low_hrv",
+                "severity": "warning",
+                "message": f"HRV critically low: {hrv} ms",
+            }
+        )
     elif hrv < 30:
-        alerts.append({"type": "low_hrv", "severity": "info", "message": f"HRV below optimal: {hrv} ms"})
-    
+        alerts.append(
+            {
+                "type": "low_hrv",
+                "severity": "info",
+                "message": f"HRV below optimal: {hrv} ms",
+            }
+        )
+
     # Baseline comparison
     baseline = get_baseline(patient_id)
     if baseline and baseline.get("heart_rate") and baseline.get("hrv"):
-        hr_change = ((heart_rate - baseline["heart_rate"]) / baseline["heart_rate"]) * 100
+        hr_change = (
+            (heart_rate - baseline["heart_rate"]) / baseline["heart_rate"]
+        ) * 100
         hrv_change = ((hrv - baseline["hrv"]) / baseline["hrv"]) * 100
-        
+
         if hr_change > 20:
-            alerts.append({
-                "type": "baseline_deviation",
-                "severity": "warning",
-                "message": f"Heart rate {hr_change:.0f}% above baseline"
-            })
-        
+            alerts.append(
+                {
+                    "type": "baseline_deviation",
+                    "severity": "warning",
+                    "message": f"Heart rate {hr_change:.0f}% above baseline",
+                }
+            )
+
         if hrv_change < -30:
-            alerts.append({
-                "type": "baseline_deviation", 
-                "severity": "warning",
-                "message": f"HRV {abs(hrv_change):.0f}% below baseline"
-            })
-    
+            alerts.append(
+                {
+                    "type": "baseline_deviation",
+                    "severity": "warning",
+                    "message": f"HRV {abs(hrv_change):.0f}% below baseline",
+                }
+            )
+
     return alerts
+
 
 def get_assessment(hr_pct: float, hrv_pct: float) -> str:
     """Generate assessment based on baseline deviations"""
