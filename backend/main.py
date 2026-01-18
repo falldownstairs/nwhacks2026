@@ -34,6 +34,8 @@ frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://heypulsera.tech",
+    "https://www.heypulsera.tech",
     frontend_url,
     # Also allow the https version if http was provided
     frontend_url.replace("http://", "https://") if frontend_url.startswith("http://") else frontend_url,
@@ -116,7 +118,44 @@ async def stream_tts_to_websocket(websocket: WebSocket, text: str):
 @app.websocket("/ws/camera")
 async def websocket_camera(websocket: WebSocket):
     """WebSocket endpoint for real-time camera heart rate monitoring"""
-    await camera_websocket_endpoint(websocket)
+    # Accept with subprotocol if provided (for ngrok bypass)
+    subprotocol = None
+    if websocket.headers.get("sec-websocket-protocol"):
+        subprotocol = "ngrok-skip-browser-warning"
+    await websocket.accept(subprotocol=subprotocol)
+    
+    # Import here to avoid circular import
+    from camera_stream import WebSocketHeartRateMonitor
+    
+    monitor = None
+    try:
+        monitor = WebSocketHeartRateMonitor()
+        monitor.is_running = True
+
+        while monitor.is_running:
+            data = monitor.get_frame_data()
+            if data:
+                await websocket.send_json(data)
+
+            # ~30 FPS
+            await asyncio.sleep(0.033)
+
+            # Check for stop command
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
+                if msg == "stop":
+                    break
+            except asyncio.TimeoutError:
+                pass
+
+    except WebSocketDisconnect:
+        print("WebSocket disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        if monitor:
+            monitor.release()
+        print("Camera released")
 
 
 # ============== WebSocket for Voice Chat ==============
@@ -143,7 +182,11 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
     - {"type": "session_summary", "data": {...}}
     - {"type": "error", "message": "error description"}
     """
-    await websocket.accept()
+    # Accept with subprotocol if provided (for ngrok bypass)
+    subprotocol = None
+    if websocket.headers.get("sec-websocket-protocol"):
+        subprotocol = "ngrok-skip-browser-warning"
+    await websocket.accept(subprotocol=subprotocol)
 
     # Create chat agent for this session
     try:

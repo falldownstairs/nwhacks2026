@@ -8,6 +8,7 @@ const api = axios.create({
     baseURL: BACKEND_URL,
     headers: {
         "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",  // Skip ngrok interstitial page
     },
 });
 
