@@ -1,17 +1,18 @@
 import asyncio
+import json
 import sys
-from fastapi import FastAPI, HTTPException, WebSocket
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from agents import (create_pulse_chat_agent, run_agent_analysis,
+                    transcribe_base64)
+from camera_stream import camera_websocket_endpoint
+from database import patients, vitals
+from db_helpers import (calculate_stats, get_all_vitals, get_baseline,
+                        get_patient, get_recent_vitals, store_new_vital)
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
-from db_helpers import (
-    get_patient, get_recent_vitals, get_all_vitals, 
-    store_new_vital, get_baseline, calculate_stats
-)
-from database import patients, vitals
-from agents import run_agent_analysis
-from camera_stream import camera_websocket_endpoint
 
 try:
     import uvloop
@@ -30,12 +31,219 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Store active chat sessions
+active_chat_sessions: Dict[str, Any] = {}
+
 # ============== WebSocket for Camera ==============
 
 @app.websocket("/ws/camera")
 async def websocket_camera(websocket: WebSocket):
     """WebSocket endpoint for real-time camera heart rate monitoring"""
     await camera_websocket_endpoint(websocket)
+
+# ============== WebSocket for Voice Chat ==============
+
+@app.websocket("/ws/chat/{patient_id}")
+async def websocket_chat(websocket: WebSocket, patient_id: str):
+    """
+    WebSocket endpoint for real-time voice chat during health check-ins.
+    
+    Messages from client:
+    - {"type": "text", "content": "message text"}
+    - {"type": "audio", "data": "base64_audio", "format": "webm"}
+    - {"type": "get_greeting"}
+    - {"type": "vital_result", "heart_rate": 72, "hrv": 45, "is_normal": true}
+    - {"type": "end_session"}
+    
+    Messages to client:
+    - {"type": "greeting", "content": "Hello!"}
+    - {"type": "response", "content": "AI response", "context": "extracted context"}
+    - {"type": "transcription", "text": "transcribed text"}
+    - {"type": "vital_response", "content": "Your vitals look great!"}
+    - {"type": "session_summary", "data": {...}}
+    - {"type": "error", "message": "error description"}
+    """
+    await websocket.accept()
+    
+    # Create chat agent for this session
+    try:
+        chat_agent = create_pulse_chat_agent(patient_id)
+        session_id = f"{patient_id}_{datetime.utcnow().timestamp()}"
+        active_chat_sessions[session_id] = chat_agent
+    except Exception as e:
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Failed to initialize chat agent: {str(e)}"
+        })
+        await websocket.close()
+        return
+    
+    try:
+        while True:
+            # Receive message
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+            
+            if msg_type == "get_greeting":
+                # Send initial greeting
+                greeting = chat_agent.get_greeting()
+                await websocket.send_json({
+                    "type": "greeting",
+                    "content": greeting
+                })
+            
+            elif msg_type == "text":
+                # Process text message
+                content = message.get("content", "")
+                if content:
+                    result = chat_agent.process_message(content)
+                    await websocket.send_json({
+                        "type": "response",
+                        "content": result["response"],
+                        "context": result.get("context_extracted", "")
+                    })
+            
+            elif msg_type == "audio":
+                # Transcribe audio and then process
+                audio_data = message.get("data", "")
+                audio_format = message.get("format", "webm")
+                
+                if audio_data:
+                    # Transcribe using Groq
+                    transcription = await transcribe_base64(
+                        audio_data, 
+                        audio_format
+                    )
+                    
+                    if transcription["success"] and transcription["text"]:
+                        # Send transcription first
+                        await websocket.send_json({
+                            "type": "transcription",
+                            "text": transcription["text"]
+                        })
+                        
+                        # Then process with chat agent
+                        result = chat_agent.process_message(transcription["text"])
+                        await websocket.send_json({
+                            "type": "response",
+                            "content": result["response"],
+                            "context": result.get("context_extracted", "")
+                        })
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": transcription.get("error", "Transcription failed")
+                        })
+            
+            elif msg_type == "vital_result":
+                # Generate response to vital measurement
+                heart_rate = message.get("heart_rate", 0)
+                hrv = message.get("hrv", 0)
+                is_normal = message.get("is_normal", True)
+                
+                vital_response = chat_agent.get_vital_response(
+                    heart_rate, hrv, is_normal
+                )
+                await websocket.send_json({
+                    "type": "vital_response",
+                    "content": vital_response
+                })
+            
+            elif msg_type == "end_session":
+                # End the session and return summary
+                summary = chat_agent.get_session_summary()
+                await websocket.send_json({
+                    "type": "session_summary",
+                    "data": summary
+                })
+                break
+            
+            else:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Unknown message type: {msg_type}"
+                })
+    
+    except WebSocketDisconnect:
+        print(f"Chat WebSocket disconnected for patient {patient_id}")
+    except Exception as e:
+        print(f"Chat WebSocket error: {str(e)}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
+        except Exception:
+            pass
+    finally:
+        # Cleanup session
+        if session_id in active_chat_sessions:
+            del active_chat_sessions[session_id]
+
+# ============== REST Endpoints for Chat ==============
+
+class ChatMessageRequest(BaseModel):
+    patient_id: str
+    message: str
+    session_id: Optional[str] = None
+
+class AudioTranscribeRequest(BaseModel):
+    audio_base64: str
+    format: str = "webm"
+    language: str = "en"
+
+@app.post("/chat/message")
+async def chat_message(request: ChatMessageRequest):
+    """
+    Send a text message to the chat agent (REST alternative to WebSocket).
+    Note: For real-time conversation, prefer the WebSocket endpoint.
+    """
+    try:
+        chat_agent = create_pulse_chat_agent(request.patient_id)
+        
+        # If no greeting has been sent, get one first
+        greeting = chat_agent.get_greeting()
+        
+        # Process the message
+        result = chat_agent.process_message(request.message)
+        
+        return {
+            "success": True,
+            "greeting": greeting,
+            "response": result["response"],
+            "context_extracted": result.get("context_extracted", "")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/transcribe")
+async def transcribe_audio_endpoint(request: AudioTranscribeRequest):
+    """
+    Transcribe audio to text using Groq Whisper.
+    """
+    try:
+        result = await transcribe_base64(
+            request.audio_base64,
+            request.format,
+            request.language
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "text": result["text"],
+                "language": result.get("language", "en")
+            }
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail=result.get("error", "Transcription failed")
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============== Pydantic Models ==============
 

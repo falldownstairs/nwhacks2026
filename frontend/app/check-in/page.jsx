@@ -1,8 +1,9 @@
 'use client';
 
+import VoiceChat from '@/components/VoiceChat';
 import { analyzeVitals } from '@/lib/api';
 import { saveAnalysis, saveVitals } from '@/lib/storage';
-import { Activity, AlertCircle, AlertTriangle, Camera, CheckCircle, Heart, Wifi, WifiOff } from 'lucide-react';
+import { Activity, AlertCircle, AlertTriangle, Camera, CheckCircle, Heart, MessageCircle, Wifi, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -58,6 +59,10 @@ export default function CheckInPage() {
   const [demoMode, setDemoMode] = useState('normal');
   const [analyzing, setAnalyzing] = useState(false);
   const [useRealCamera, setUseRealCamera] = useState(true);
+  
+  // Voice chat state
+  const [chatActive, setChatActive] = useState(false);
+  const [vitalsForChat, setVitalsForChat] = useState(null);
   
   // WebSocket camera state
   const [connected, setConnected] = useState(false);
@@ -152,6 +157,7 @@ export default function CheckInPage() {
           }
           
           setCapturedVitals(vitals);
+          setVitalsForChat(vitals);  // Send vitals to chat for AI response
           setStep(3);
           disconnectCamera();
           return 0;
@@ -189,7 +195,10 @@ export default function CheckInPage() {
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => disconnectCamera();
+    return () => {
+      disconnectCamera();
+      setChatActive(false);
+    };
   }, [disconnectCamera]);
 
   const startMeasurement = () => {
@@ -200,6 +209,8 @@ export default function CheckInPage() {
     setStep(2);
     setCountdown(30);
     setProgress(0);
+    setChatActive(true);  // Activate voice chat
+    setVitalsForChat(null);  // Reset vitals for chat
     
     if (useRealCamera) {
       connectCamera();
@@ -207,7 +218,7 @@ export default function CheckInPage() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto animate-fadeIn">
+    <div className={`mx-auto animate-fadeIn ${step === 2 || step === 3 ? 'max-w-5xl' : 'max-w-2xl'}`}>
       {/* Step 1: Welcome */}
       {step === 1 && (
         <div className="card text-center py-8">
@@ -291,144 +302,176 @@ export default function CheckInPage() {
         </div>
       )}
 
-      {/* Step 2: Camera Capture */}
+      {/* Step 2: Camera Capture with Voice Chat */}
       {step === 2 && (
-        <div className="card text-center py-6">
-          {useRealCamera ? (
-            <>
-              {/* Connection Status */}
-              <div className="flex items-center justify-center gap-2 mb-4">
-                {connected ? (
-                  <span className="flex items-center gap-2 text-green-400 text-sm">
-                    <Wifi className="w-4 h-4" />
-                    Connected to Python Camera
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-2 text-yellow-400 text-sm">
-                    <WifiOff className="w-4 h-4" />
-                    Connecting...
-                  </span>
-                )}
-              </div>
-
-              {/* Video Frame */}
-              <div className="relative w-full aspect-video bg-black rounded-xl overflow-hidden mb-4">
-                {frameData ? (
-                  <img
-                    src={`data:image/jpeg;base64,${frameData}`}
-                    alt="Camera feed"
-                    className="w-full h-full object-contain"
-                  />
-                ) : (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-center">
-                      <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                      <p className="text-gray-400">Initializing camera...</p>
-                    </div>
-                  </div>
-                )}
-                
-                {/* Overlay Stats */}
-                {frameData && (
-                  <div className="absolute top-4 right-4 flex flex-col gap-2">
-                    <div className={`px-3 py-1 rounded-full text-sm font-medium ${
-                      faceDetected ? 'bg-green-500/80' : 'bg-red-500/80'
-                    }`}>
-                      {faceDetected ? '✓ Face Detected' : '✗ No Face'}
-                    </div>
-                    {currentHR && (
-                      <div className="bg-blue-500/80 px-3 py-1 rounded-full text-sm font-bold">
-                        ❤️ {currentHR} BPM
-                      </div>
-                    )}
-                    {confidence > 0 && (
-                      <div className="bg-purple-500/80 px-3 py-1 rounded-full text-sm">
-                        {confidence}% confidence
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {connectionError && (
-                <div className="bg-red-500/20 text-red-300 p-3 rounded-lg mb-4 text-sm">
-                  {connectionError}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left Side: Camera Feed */}
+          <div className="card text-center py-6">
+            {useRealCamera ? (
+              <>
+                {/* Connection Status */}
+                <div className="flex items-center justify-center gap-2 mb-4">
+                  {connected ? (
+                    <span className="flex items-center gap-2 text-green-400 text-sm">
+                      <Wifi className="w-4 h-4" />
+                      Connected to Python Camera
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-2 text-yellow-400 text-sm">
+                      <WifiOff className="w-4 h-4" />
+                      Connecting...
+                    </span>
+                  )}
                 </div>
-              )}
 
-              {/* Calibration progress */}
-              {!currentHR && calibrationProgress > 0 && (
-                <div className="mb-4">
-                  <p className="text-sm text-gray-400 mb-1">Calibrating PPG signal...</p>
-                  <div className="w-full bg-gray-700 rounded-full h-2">
-                    <div 
-                      className="bg-orange-500 h-full rounded-full transition-all"
-                      style={{ width: `${calibrationProgress}%` }}
+                {/* Video Frame */}
+                <div className="relative w-full aspect-video bg-black rounded-xl overflow-hidden mb-4">
+                  {frameData ? (
+                    <img
+                      src={`data:image/jpeg;base64,${frameData}`}
+                      alt="Camera feed"
+                      className="w-full h-full object-contain"
                     />
-                  </div>
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                        <p className="text-gray-400">Initializing camera...</p>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Overlay Stats */}
+                  {frameData && (
+                    <div className="absolute top-4 right-4 flex flex-col gap-2">
+                      <div className={`px-3 py-1 rounded-full text-sm font-medium ${
+                        faceDetected ? 'bg-green-500/80' : 'bg-red-500/80'
+                      }`}>
+                        {faceDetected ? '✓ Face Detected' : '✗ No Face'}
+                      </div>
+                      {currentHR && (
+                        <div className="bg-blue-500/80 px-3 py-1 rounded-full text-sm font-bold">
+                          ❤️ {currentHR} BPM
+                        </div>
+                      )}
+                      {confidence > 0 && (
+                        <div className="bg-purple-500/80 px-3 py-1 rounded-full text-sm">
+                          {confidence}% confidence
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
-            </>
-          ) : (
-            /* Demo mode animation */
-            <div className="relative w-40 h-40 mx-auto mb-6">
-              <div className="absolute inset-0 rounded-full bg-blue-500/20 animate-ping" />
-              <div className="absolute inset-4 rounded-full bg-blue-500/40 animate-pulse" />
-              <div className="absolute inset-8 rounded-full bg-blue-500 flex items-center justify-center animate-heartbeat">
-                <Heart className="w-12 h-12 text-white" />
+
+                {connectionError && (
+                  <div className="bg-red-500/20 text-red-300 p-3 rounded-lg mb-4 text-sm">
+                    {connectionError}
+                  </div>
+                )}
+
+                {/* Calibration progress */}
+                {!currentHR && calibrationProgress > 0 && (
+                  <div className="mb-4">
+                    <p className="text-sm text-gray-400 mb-1">Calibrating PPG signal...</p>
+                    <div className="w-full bg-gray-700 rounded-full h-2">
+                      <div 
+                        className="bg-orange-500 h-full rounded-full transition-all"
+                        style={{ width: `${calibrationProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              /* Demo mode animation */
+              <div className="relative w-40 h-40 mx-auto mb-6">
+                <div className="absolute inset-0 rounded-full bg-blue-500/20 animate-ping" />
+                <div className="absolute inset-4 rounded-full bg-blue-500/40 animate-pulse" />
+                <div className="absolute inset-8 rounded-full bg-blue-500 flex items-center justify-center animate-heartbeat">
+                  <Heart className="w-12 h-12 text-white" />
+                </div>
               </div>
+            )}
+
+            <p className="text-4xl font-bold text-blue-400 mb-2">{countdown}s</p>
+            <p className="text-gray-400 mb-4">
+              {useRealCamera 
+                ? (faceDetected ? 'Measuring vitals...' : 'Position your face in the frame')
+                : 'Simulating measurement...'}
+            </p>
+
+            <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+              <div
+                className="bg-blue-500 h-full rounded-full transition-all duration-1000"
+                style={{ width: `${progress}%` }}
+              />
             </div>
-          )}
-
-          <p className="text-4xl font-bold text-blue-400 mb-2">{countdown}s</p>
-          <p className="text-gray-400 mb-4">
-            {useRealCamera 
-              ? (faceDetected ? 'Measuring vitals...' : 'Position your face in the frame')
-              : 'Simulating measurement...'}
-          </p>
-
-          <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
-            <div
-              className="bg-blue-500 h-full rounded-full transition-all duration-1000"
-              style={{ width: `${progress}%` }}
-            />
+            <p className="text-sm text-gray-500 mt-2">{Math.round(progress)}% complete</p>
           </div>
-          <p className="text-sm text-gray-500 mt-2">{Math.round(progress)}% complete</p>
+
+          {/* Right Side: Voice Chat */}
+          <div className="flex flex-col">
+            <VoiceChat 
+              patientId="maria_001"
+              isActive={chatActive}
+              vitalsData={vitalsForChat}
+              className="flex-1"
+            />
+            <div className="mt-3 p-3 bg-blue-900/20 rounded-lg">
+              <p className="text-xs text-blue-300 flex items-center gap-2">
+                <MessageCircle className="w-4 h-4" />
+                Chat with Pulse while we measure your vitals. Speak or type to share how you're feeling.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Step 3: Results */}
+      {/* Step 3: Results with continued chat */}
       {step === 3 && capturedVitals && (
-        <div className="card text-center py-12">
-          {analyzing ? (
-            <>
-              <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-6" />
-              <h2 className="text-2xl font-bold mb-2">Analyzing with AI...</h2>
-              <p className="text-gray-400">Our agents are reviewing your vitals</p>
-            </>
-          ) : (
-            <>
-              <CheckCircle className="w-16 h-16 text-green-400 mx-auto mb-6" />
-              <h2 className="text-2xl font-bold mb-6">Vitals Captured</h2>
-              <div className="grid grid-cols-3 gap-4 mb-6">
-                <div className="bg-gray-700 rounded-xl p-4">
-                  <Heart className="w-6 h-6 text-red-400 mx-auto mb-2" />
-                  <p className="text-2xl font-bold">{capturedVitals.heart_rate}</p>
-                  <p className="text-sm text-gray-400">bpm</p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left Side: Results */}
+          <div className="card text-center py-12">
+            {analyzing ? (
+              <>
+                <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-6" />
+                <h2 className="text-2xl font-bold mb-2">Analyzing with AI...</h2>
+                <p className="text-gray-400">Our agents are reviewing your vitals</p>
+              </>
+            ) : (
+              <>
+                <CheckCircle className="w-16 h-16 text-green-400 mx-auto mb-6" />
+                <h2 className="text-2xl font-bold mb-6">Vitals Captured</h2>
+                <div className="grid grid-cols-3 gap-4 mb-6">
+                  <div className="bg-gray-700 rounded-xl p-4">
+                    <Heart className="w-6 h-6 text-red-400 mx-auto mb-2" />
+                    <p className="text-2xl font-bold">{capturedVitals.heart_rate}</p>
+                    <p className="text-sm text-gray-400">bpm</p>
+                  </div>
+                  <div className="bg-gray-700 rounded-xl p-4">
+                    <Activity className="w-6 h-6 text-green-400 mx-auto mb-2" />
+                    <p className="text-2xl font-bold">{Math.round(capturedVitals.hrv)}</p>
+                    <p className="text-sm text-gray-400">ms HRV</p>
+                  </div>
+                  <div className="bg-gray-700 rounded-xl p-4">
+                    <CheckCircle className="w-6 h-6 text-blue-400 mx-auto mb-2" />
+                    <p className="text-2xl font-bold">{Math.round(capturedVitals.quality_score * 100)}%</p>
+                    <p className="text-sm text-gray-400">Quality</p>
+                  </div>
                 </div>
-                <div className="bg-gray-700 rounded-xl p-4">
-                  <Activity className="w-6 h-6 text-green-400 mx-auto mb-2" />
-                  <p className="text-2xl font-bold">{Math.round(capturedVitals.hrv)}</p>
-                  <p className="text-sm text-gray-400">ms HRV</p>
-                </div>
-                <div className="bg-gray-700 rounded-xl p-4">
-                  <CheckCircle className="w-6 h-6 text-blue-400 mx-auto mb-2" />
-                  <p className="text-2xl font-bold">{Math.round(capturedVitals.quality_score * 100)}%</p>
-                  <p className="text-sm text-gray-400">Quality</p>
-                </div>
-              </div>
-            </>
-          )}
+              </>
+            )}
+          </div>
+
+          {/* Right Side: Chat continues with vital response */}
+          <div className="flex flex-col">
+            <VoiceChat 
+              patientId="maria_001"
+              isActive={chatActive}
+              vitalsData={vitalsForChat}
+              className="flex-1"
+            />
+          </div>
         </div>
       )}
     </div>
