@@ -9,6 +9,7 @@ from db_helpers import (
     store_new_vital, get_baseline, calculate_stats
 )
 from database import patients, vitals
+from agents import run_agent_analysis
 
 app = FastAPI(title="Chronic Disease MVP", version="1.0.0")
 
@@ -50,6 +51,12 @@ class AlertThresholds(BaseModel):
     hrv_low: float = 20
     hr_change_percent: float = 20  # % change from baseline
     hrv_change_percent: float = 30
+
+class VitalAnalyzeRequest(BaseModel):
+    patient_id: str
+    heart_rate: float
+    hrv: float
+    quality_score: float = 0.9
 
 # ============== Health Check ==============
 
@@ -209,6 +216,72 @@ def get_latest_vital(patient_id: str):
     
     latest["_id"] = str(latest["_id"])
     return latest
+
+# ============== AI Agent Analysis Endpoint ==============
+
+@app.post("/vitals/analyze")
+def analyze_vitals(request: VitalAnalyzeRequest):
+    """
+    Store vitals and run AI agent analysis for decompensation detection.
+    
+    This endpoint:
+    1. Stores the new vital measurement
+    2. Runs the 3-agent AI analysis workflow:
+       - Daily Vitals Agent: Validates and retrieves context
+       - Decompensation Agent: Calculates risk and clinical reasoning
+       - Health Literacy Agent: Generates patient-friendly explanation
+    3. Returns comprehensive analysis results
+    """
+    # Verify patient exists
+    if not get_patient(request.patient_id):
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    # Store the vital first
+    vital_id = store_new_vital(
+        request.patient_id,
+        request.heart_rate,
+        request.hrv,
+        request.quality_score
+    )
+    
+    # Run AI agent analysis
+    try:
+        analysis = run_agent_analysis(
+            patient_id=request.patient_id,
+            heart_rate=request.heart_rate,
+            hrv=request.hrv,
+            quality_score=request.quality_score
+        )
+    except Exception as e:
+        # Return partial response if AI analysis fails
+        return {
+            "vital_id": vital_id,
+            "patient_id": request.patient_id,
+            "analysis_error": str(e),
+            "risk_assessment": {
+                "score": 0,
+                "level": "UNKNOWN",
+                "clinical_reasoning": "AI analysis unavailable",
+                "recommended_actions": ["Continue monitoring", "Contact provider if concerned"]
+            },
+            "patient_explanation": "Your vitals have been recorded. Please continue your regular monitoring.",
+            "agent_steps": [],
+            "alerts": [f"AI analysis failed: {str(e)}"]
+        }
+    
+    # Return complete response
+    return {
+        "vital_id": vital_id,
+        "patient_id": request.patient_id,
+        "current_vitals": analysis.get("current_vitals"),
+        "baseline": analysis.get("baseline"),
+        "deviations": analysis.get("deviations"),
+        "risk_assessment": analysis.get("risk_assessment"),
+        "patient_explanation": analysis.get("patient_explanation"),
+        "agent_steps": analysis.get("agent_steps", []),
+        "alerts": analysis.get("alerts", []),
+        "errors": analysis.get("errors", [])
+    }
 
 # ============== Analytics Endpoints ==============
 
