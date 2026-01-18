@@ -136,7 +136,7 @@ def assess_risk_node(state: VitalsState) -> Dict[str, Any]:
     try:
         model = get_gemini_model(temperature=0.3)
         
-        prompt = f"""You are a cardiologist reviewing vitals for a 68-year-old heart failure patient.
+        prompt = f"""You are a cardiologist reviewing vitals for a patient.
 
 CURRENT READING:
 - Heart Rate: {vitals['heart_rate']} bpm (baseline: {baseline.get('heart_rate', 70)} bpm)
