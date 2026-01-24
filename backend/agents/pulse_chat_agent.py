@@ -2,9 +2,16 @@
 """
 Pulse Chat Agent - Conversational AI for health check-ins using Gemini 2.0 Flash.
 This agent acts as a compassionate health companion during vital measurements.
+
+Now with full reliability architecture:
+- Input sanitization and intent classification (Gatekeeper)
+- Cascading LLM fallbacks (Gemini -> Groq -> VADER -> Hardcoded)
+- Never hangs on a patient
 """
 
 import os
+import asyncio
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -12,7 +19,20 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+# Reliability imports
+from .gatekeeper import process_input, Intent, GatekeeperResult
+from .llm_client import get_llm_client, ResilientLLMClient, LLMProvider
+from .fallback_responses import (
+    get_greeting_fallback,
+    get_vital_response_fallback,
+    get_icebreaker_question,
+    HARDCODED_NEUTRAL_FALLBACK,
+    ICEBREAKER_QUESTIONS,
+)
+
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Configure Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -78,6 +98,14 @@ Remember: You're gathering valuable health context while providing emotional sup
         self.subjective_data: List[Dict[str, Any]] = []
         self.model = None
         self.chat = None
+        
+        # Reliability: Get the resilient LLM client
+        self.resilient_client: ResilientLLMClient = get_llm_client()
+        
+        # Icebreaker tracking for calibration phase
+        self.icebreaker_index = 0
+        self.is_calibrating = True
+        
         self._initialize_model()
 
     def _initialize_model(self):
@@ -175,6 +203,134 @@ Keep it to 2 sentences max."""
                 }
             )
             return fallback
+
+    def get_icebreaker(self) -> str:
+        """
+        Get an icebreaker question during calibration phase.
+        Used to mask rPPG latency with meaningful subjective data collection.
+        """
+        question = get_icebreaker_question(self.icebreaker_index)
+        self.icebreaker_index = (self.icebreaker_index + 1) % len(ICEBREAKER_QUESTIONS)
+        
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": question,
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": "icebreaker"
+        })
+        
+        return question
+
+    def set_calibration_complete(self):
+        """Mark calibration as complete."""
+        self.is_calibrating = False
+
+    async def process_message_resilient(self, user_message: str) -> Dict[str, Any]:
+        """
+        Process a user message with full reliability pipeline.
+        
+        Pipeline:
+        1. Gatekeeper (sanitize + classify intent)
+        2. Bypass LLM for out-of-scope or blocked content
+        3. Resilient LLM call (Gemini -> Groq -> VADER -> Hardcoded)
+        
+        Args:
+            user_message: The user's raw message
+            
+        Returns:
+            Dict containing response and metadata
+        """
+        # Step 1: Gatekeeper
+        gatekeeper_result: GatekeeperResult = process_input(user_message)
+        
+        # Store user message (sanitized)
+        self.conversation_history.append({
+            "role": "user",
+            "content": gatekeeper_result.sanitized_text,
+            "timestamp": datetime.utcnow().isoformat(),
+            "intent": gatekeeper_result.intent.value,
+            "flags": gatekeeper_result.flags
+        })
+        
+        # Step 2: Check if we should bypass LLM
+        if gatekeeper_result.should_bypass_llm:
+            bypass_msg = gatekeeper_result.bypass_response.get("message", HARDCODED_NEUTRAL_FALLBACK["message"])
+            
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": bypass_msg,
+                "timestamp": datetime.utcnow().isoformat(),
+                "type": "bypass",
+                "reason": "blocked" if not gatekeeper_result.is_safe else "out_of_scope"
+            })
+            
+            return {
+                "response": bypass_msg,
+                "success": True,
+                "bypassed_llm": True,
+                "intent": gatekeeper_result.intent.value,
+                "is_safe": gatekeeper_result.is_safe
+            }
+        
+        # Step 3: Build context-aware prompt
+        context_prompt = f"""User said: "{gatekeeper_result.sanitized_text}"
+
+Respond empathetically and briefly (2-3 sentences). If they mention any symptoms, feelings, or health-related information, acknowledge it caringly.
+
+After your response, on a new line starting with "CONTEXT:", briefly note any health-relevant information from their message (symptoms, mood, physical state, concerns). If nothing health-relevant, write "CONTEXT: general check-in"."""
+        
+        # Step 4: Call resilient LLM
+        llm_response = await self.resilient_client.generate(
+            prompt=context_prompt,
+            system_prompt=self.system_prompt,
+            chat_history=[{"role": h["role"], "content": h["content"]} 
+                          for h in self.conversation_history[-10:]],  # Last 10 messages for context
+            context=self.patient_context
+        )
+        
+        full_response = llm_response.text
+        
+        # Parse response and context
+        if "CONTEXT:" in full_response:
+            parts = full_response.split("CONTEXT:")
+            ai_response = parts[0].strip()
+            context_tag = parts[1].strip() if len(parts) > 1 else "general"
+        else:
+            ai_response = full_response
+            context_tag = "general"
+        
+        # Store AI response
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": ai_response,
+            "timestamp": datetime.utcnow().isoformat(),
+            "provider": llm_response.provider.value,
+            "fallback_used": llm_response.fallback_used
+        })
+        
+        # Store subjective data
+        self.subjective_data.append({
+            "user_input": gatekeeper_result.sanitized_text,
+            "context_tag": context_tag,
+            "timestamp": datetime.utcnow().isoformat(),
+            "intent": gatekeeper_result.intent.value
+        })
+        
+        # Flag emergency intent for clinical alert
+        should_alert = gatekeeper_result.intent == Intent.EMERGENCY
+        if llm_response.metadata.get("should_alert"):
+            should_alert = True
+        
+        return {
+            "response": ai_response,
+            "context_extracted": context_tag,
+            "success": True,
+            "intent": gatekeeper_result.intent.value,
+            "provider": llm_response.provider.value,
+            "fallback_used": llm_response.fallback_used,
+            "latency_ms": llm_response.latency_ms,
+            "should_alert_clinician": should_alert
+        }
 
     def process_message(self, user_message: str) -> Dict[str, Any]:
         """

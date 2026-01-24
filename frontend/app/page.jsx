@@ -5,6 +5,7 @@ import { Activity, Heart, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { Line } from 'react-chartjs-2';
 
+import ChatWidget from '@/components/ChatWidget';
 import RiskBadge from '@/components/RiskBadge';
 import SkeletonCard from '@/components/SkeletonCard';
 import VitalCard from '@/components/VitalCard';
@@ -205,6 +206,9 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Floating Chat Widget */}
+      <ChatWidget patientId="maria_001" />
     </div>
   );
 }

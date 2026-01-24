@@ -15,6 +15,8 @@ const VoiceChat = forwardRef(function VoiceChat({
   isActive = true,       // Whether chat should be active
   onStateChange = null,  // Callback: ({isSpeaking, isRecording, isProcessing}) => void
   onSessionEnd = null,   // Callback: (sessionSummary) => void - called when session ends
+  showHeader = true,     // Whether to show the chat header (false when used in ChatWidget)
+  endpoint = 'chat',     // WebSocket endpoint: 'chat' for check-in, 'health-chat' for dashboard
   className = ''
 }, ref) {
   // WebSocket and connection state
@@ -38,7 +40,6 @@ const VoiceChat = forwardRef(function VoiceChat({
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [showTextInput, setShowTextInput] = useState(false);
   
   // Auto-scroll ref
   const messagesEndRef = useRef(null);
@@ -61,13 +62,19 @@ const VoiceChat = forwardRef(function VoiceChat({
     audioRef.current.onplay = () => setIsSpeaking(true);
     audioRef.current.onended = () => setIsSpeaking(false);
     audioRef.current.onerror = (e) => {
-      console.error('Audio playback error:', e);
+      // Only log if there's an actual source set (not just initialization errors)
+      if (audioRef.current?.src && audioRef.current.src !== '' && !audioRef.current.src.endsWith('/')) {
+        console.warn('Audio playback error:', e.target?.error?.message || 'Unknown error');
+      }
       setIsSpeaking(false);
     };
     
     return () => {
       if (audioRef.current) {
         audioRef.current.pause();
+        if (audioRef.current.src && audioRef.current.src.startsWith('blob:')) {
+          URL.revokeObjectURL(audioRef.current.src);
+        }
         audioRef.current.src = '';
       }
     };
@@ -258,7 +265,7 @@ const VoiceChat = forwardRef(function VoiceChat({
     }, 10000); // 10 seconds
     
     // Check if backend is likely running first
-    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}/ws/chat/${patientId}`;
+    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}/ws/${endpoint}/${patientId}`;
     console.log('Attempting to connect to:', wsUrl);
     
     const ws = new WebSocket(wsUrl);
@@ -302,7 +309,7 @@ const VoiceChat = forwardRef(function VoiceChat({
       setConnected(false);
       setConnecting(false);
     };
-  }, [patientId, handleMessage]);
+  }, [patientId, endpoint, handleMessage]);
 
   // Initialize connection when component mounts
   useEffect(() => {
@@ -494,58 +501,54 @@ const VoiceChat = forwardRef(function VoiceChat({
   }, [sendTextMessage]);
 
   return (
-    <div className={`flex flex-col bg-gray-800/50 rounded-xl border border-gray-700 ${className}`}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-        <div className="flex items-center gap-2">
-          <MessageCircle className="w-5 h-5 text-blue-400" />
-          <span className="font-medium text-gray-200">Pulsera AI</span>
-          {connected && (
-            <span className="flex items-center gap-1 text-xs text-green-400">
-              <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-              Connected
-            </span>
-          )}
-          {isSpeaking && (
-            <span className="flex items-center gap-1 text-xs text-purple-400">
-              <Volume2 className="w-3 h-3 animate-pulse" />
-              Speaking
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleMute}
-            className={`p-1.5 rounded-lg transition-colors ${
-              isMuted 
-                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' 
-                : 'text-gray-400 hover:text-white hover:bg-gray-700'
-            }`}
-            title={isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
-          >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
-          <button
-            onClick={() => setShowTextInput(!showTextInput)}
-            className="text-xs text-gray-400 hover:text-white transition-colors"
-          >
-            {showTextInput ? 'Hide keyboard' : 'Use keyboard'}
-          </button>
+    <div className={`flex flex-col bg-gray-800/50 rounded-xl border border-gray-700/50 shadow-xl h-full max-h-[600px] ${className}`}>
+      {/* Header - can be hidden when embedded in ChatWidget */}
+      {showHeader && (
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700/50 bg-gray-800/30 rounded-t-xl">
+          <div className="flex items-center gap-3">
+            <MessageCircle className="w-6 h-6 text-blue-400" />
+            <span className="font-semibold text-lg text-gray-100">Pulsera AI</span>
+            {connected && (
+              <span className="flex items-center gap-1.5 text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded-full">
+                <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                Connected
+              </span>
+            )}
+            {isSpeaking && (
+              <span className="flex items-center gap-1.5 text-xs text-purple-400 bg-purple-400/10 px-2 py-1 rounded-full">
+                <Volume2 className="w-3 h-3 animate-pulse" />
+                Speaking
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={toggleMute}
+              className={`p-2 rounded-lg transition-colors ${
+                isMuted 
+                  ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' 
+                  : 'text-gray-400 hover:text-white hover:bg-gray-700'
+              }`}
+              title={isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
+            >
+              {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            </button>
         </div>
       </div>
+      )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[200px] max-h-[300px]">
+      <div className="flex-1 overflow-y-auto p-5 space-y-4 min-h-0">
         {messages.length === 0 && !connecting && (
-          <div className="text-center text-gray-500 py-8">
-            <Volume2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
+          <div className="text-center text-gray-500 py-12">
+            <Volume2 className="w-10 h-10 mx-auto mb-3 opacity-50" />
             <p className="text-sm">Connecting to Pulsera AI...</p>
           </div>
         )}
         
         {connecting && (
-          <div className="text-center text-gray-500 py-8">
-            <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin opacity-50" />
+          <div className="text-center text-gray-500 py-12">
+            <Loader2 className="w-10 h-10 mx-auto mb-3 animate-spin opacity-50" />
             <p className="text-sm">Initializing chat...</p>
           </div>
         )}
@@ -556,14 +559,14 @@ const VoiceChat = forwardRef(function VoiceChat({
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-2 ${
+              className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                 msg.role === 'user'
-                  ? 'bg-blue-500 text-white rounded-br-sm'
+                  ? 'bg-blue-500 text-white rounded-br-md'
                   : msg.isError
-                  ? 'bg-red-500/20 text-red-300 rounded-bl-sm'
+                  ? 'bg-red-500/20 text-red-300 rounded-bl-md border border-red-500/30'
                   : msg.isVitalResponse
-                  ? 'bg-green-500/20 text-green-200 rounded-bl-sm border border-green-500/30'
-                  : 'bg-gray-700 text-gray-200 rounded-bl-sm'
+                  ? 'bg-green-500/20 text-green-200 rounded-bl-md border border-green-500/30'
+                  : 'bg-gray-700/80 text-gray-100 rounded-bl-md border border-gray-600/30'
               }`}
             >
               <p className="text-sm leading-relaxed">{msg.content}</p>
@@ -589,61 +592,62 @@ const VoiceChat = forwardRef(function VoiceChat({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
-      <div className="p-4 border-t border-gray-700">
-        {/* Text input (optional) */}
-        {showTextInput && (
-          <div className="flex gap-2 mb-3">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="Type a message..."
-              className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-              disabled={!connected || isProcessing}
-            />
+      {/* Input Area - Redesigned with integrated mic */}
+      <div className="p-4 border-t border-gray-700/50 bg-gray-800/30 rounded-b-xl">
+        {/* Combined input with mic button */}
+        <div className="flex items-center gap-3 bg-gray-700/50 rounded-xl p-2 border border-gray-600/50">
+          {/* Text input */}
+          <input
+            type="text"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyPress={handleKeyPress}
+            placeholder="Type a message or tap mic to speak..."
+            className="flex-1 bg-transparent px-3 py-2 text-sm text-white placeholder-gray-400 focus:outline-none"
+            disabled={!connected || isProcessing || isRecording}
+          />
+          
+          {/* Send text button (shows when there's text) */}
+          {inputText.trim() && (
             <button
               onClick={sendTextMessage}
-              disabled={!connected || !inputText.trim() || isProcessing}
-              className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white p-2 rounded-lg transition-colors"
+              disabled={!connected || isProcessing}
+              className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white p-2.5 rounded-lg transition-colors"
             >
               <Send className="w-5 h-5" />
             </button>
-          </div>
-        )}
-
-        {/* Voice button */}
-        <div className="flex justify-center">
+          )}
+          
+          {/* Mic button (integrated into input bar) */}
           <button
             onClick={isRecording ? stopRecording : startRecording}
             disabled={!connected || isProcessing}
-            className={`relative flex items-center justify-center w-16 h-16 rounded-full transition-all ${
+            className={`relative flex items-center justify-center w-11 h-11 rounded-xl transition-all ${
               isRecording
-                ? 'bg-red-500 hover:bg-red-600 animate-pulse'
+                ? 'bg-red-500 hover:bg-red-600'
                 : connected
                 ? 'bg-blue-500 hover:bg-blue-600'
                 : 'bg-gray-600 cursor-not-allowed'
             }`}
           >
             {isRecording ? (
-              <MicOff className="w-7 h-7 text-white" />
+              <MicOff className="w-5 h-5 text-white" />
             ) : (
-              <Mic className="w-7 h-7 text-white" />
+              <Mic className="w-5 h-5 text-white" />
             )}
             
-            {/* Recording indicator ring */}
+            {/* Recording indicator */}
             {isRecording && (
-              <span className="absolute inset-0 rounded-full border-4 border-red-400 animate-ping" />
+              <span className="absolute inset-0 rounded-xl border-2 border-red-400 animate-ping" />
             )}
           </button>
         </div>
         
-        <p className="text-center text-xs text-gray-500 mt-2">
+        <p className="text-center text-xs text-gray-500 mt-3">
           {!connected 
             ? 'Connecting...' 
             : isRecording 
-            ? 'Listening... tap to stop'
+            ? '🔴 Listening... tap to stop'
             : 'Tap to speak'}
         </p>
         

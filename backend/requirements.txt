@@ -27,3 +27,6 @@ scipy>=1.10.0
 
 # Data validation
 pydantic>=2.0.0
+
+# Sentiment analysis (fallback for LLM failures)
+vaderSentiment>=3.3.2

@@ -23,7 +23,7 @@ export default function Navigation() {
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
           <Link href="/" className="flex items-center">
-            <Image src="/logo.png" alt="Pulsera" width={180} height={60} className="h-14 w-auto" />
+            <Image src="/logo.png" alt="Pulsera" width={360} height={120} className="h-28 w-auto" />
           </Link>
 
           {/* Desktop Navigation */}

@@ -2,12 +2,19 @@ import asyncio
 import json
 import os
 import sys
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from agents import (create_pulse_chat_agent, run_agent_analysis,
-                    transcribe_base64)
+from agents import (create_health_data_chat_agent, create_pulse_chat_agent,
+                    run_agent_analysis, transcribe_base64)
 from agents.text_to_speech import synthesize_speech_streaming
+from agents.llm_client import get_llm_client
+from agents.fallback_responses import (
+    SENSOR_MESSAGES,
+    get_icebreaker_question,
+    HARDCODED_NEUTRAL_FALLBACK,
+)
 from camera_stream import camera_websocket_endpoint
 from database import patients, vitals
 from db_helpers import (calculate_stats, get_all_vitals, get_baseline,
@@ -16,6 +23,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -53,6 +64,9 @@ app.add_middleware(
 
 # Store active chat sessions
 active_chat_sessions: Dict[str, Any] = {}
+
+# Track rPPG calibration status per session
+calibration_status: Dict[str, Dict[str, Any]] = {}
 
 
 # ============== TTS Helper ==============
@@ -174,22 +188,33 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
                 await stream_tts_to_websocket(websocket, greeting)
 
             elif msg_type == "text":
-                # Process text message
+                # Process text message with resilient pipeline
                 content = message.get("content", "")
                 if content:
-                    result = chat_agent.process_message(content)
+                    # Use the async resilient method
+                    result = await chat_agent.process_message_resilient(content)
                     await websocket.send_json(
                         {
                             "type": "response",
                             "content": result["response"],
                             "context": result.get("context_extracted", ""),
+                            "provider": result.get("provider", "unknown"),
+                            "fallback_used": result.get("fallback_used", False),
                         }
                     )
                     # Stream TTS audio for response
                     await stream_tts_to_websocket(websocket, result["response"])
+                    
+                    # Check if we need to alert clinician (emergency detected)
+                    if result.get("should_alert_clinician"):
+                        await websocket.send_json({
+                            "type": "clinical_alert",
+                            "reason": "emergency_detected",
+                            "intent": result.get("intent")
+                        })
 
             elif msg_type == "audio":
-                # Transcribe audio and then process
+                # Transcribe audio and then process with resilient pipeline
                 audio_data = message.get("data", "")
                 audio_format = message.get("format", "webm")
 
@@ -203,17 +228,27 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
                             {"type": "transcription", "text": transcription["text"]}
                         )
 
-                        # Then process with chat agent
-                        result = chat_agent.process_message(transcription["text"])
+                        # Then process with resilient chat agent
+                        result = await chat_agent.process_message_resilient(transcription["text"])
                         await websocket.send_json(
                             {
                                 "type": "response",
                                 "content": result["response"],
                                 "context": result.get("context_extracted", ""),
+                                "provider": result.get("provider", "unknown"),
+                                "fallback_used": result.get("fallback_used", False),
                             }
                         )
                         # Stream TTS audio for response
                         await stream_tts_to_websocket(websocket, result["response"])
+                        
+                        # Check if we need to alert clinician
+                        if result.get("should_alert_clinician"):
+                            await websocket.send_json({
+                                "type": "clinical_alert",
+                                "reason": "emergency_detected",
+                                "intent": result.get("intent")
+                            })
                     else:
                         await websocket.send_json(
                             {
@@ -230,6 +265,9 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
                 hrv = message.get("hrv", 0)
                 is_normal = message.get("is_normal", True)
 
+                # Mark calibration complete
+                chat_agent.set_calibration_complete()
+
                 vital_response = chat_agent.get_vital_response(
                     heart_rate, hrv, is_normal
                 )
@@ -238,6 +276,50 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
                 )
                 # Stream TTS audio for vital response
                 await stream_tts_to_websocket(websocket, vital_response)
+            
+            elif msg_type == "get_icebreaker":
+                # Sensor Redundancy: Send an icebreaker question during calibration
+                # This masks the rPPG latency with meaningful subjective data collection
+                icebreaker = chat_agent.get_icebreaker()
+                await websocket.send_json({
+                    "type": "icebreaker",
+                    "content": icebreaker
+                })
+                await stream_tts_to_websocket(websocket, icebreaker)
+            
+            elif msg_type == "calibration_status":
+                # Sensor Redundancy: Handle rPPG calibration status updates
+                status = message.get("status", "unknown")
+                
+                if status == "failed":
+                    # ROI detection failed - prompt user to improve conditions
+                    failure_reason = message.get("reason", "roi_failed")
+                    sensor_msg = SENSOR_MESSAGES.get(failure_reason, SENSOR_MESSAGES["roi_failed"])
+                    await websocket.send_json({
+                        "type": "sensor_guidance",
+                        "content": sensor_msg,
+                        "can_retry": True
+                    })
+                    await stream_tts_to_websocket(websocket, sensor_msg)
+                
+                elif status == "voice_only":
+                    # Camera completely failed - degrade to voice-only mode
+                    voice_only_msg = SENSOR_MESSAGES["voice_only_mode"]
+                    await websocket.send_json({
+                        "type": "mode_change",
+                        "mode": "voice_only",
+                        "content": voice_only_msg
+                    })
+                    await stream_tts_to_websocket(websocket, voice_only_msg)
+                
+                elif status == "calibrating":
+                    # Still calibrating - send icebreaker to fill time
+                    icebreaker = chat_agent.get_icebreaker()
+                    await websocket.send_json({
+                        "type": "icebreaker", 
+                        "content": icebreaker
+                    })
+                    await stream_tts_to_websocket(websocket, icebreaker)
 
             elif msg_type == "end_session":
                 # End the session and return summary
@@ -260,6 +342,118 @@ async def websocket_chat(websocket: WebSocket, patient_id: str):
             pass
     finally:
         # Cleanup session
+        if session_id in active_chat_sessions:
+            del active_chat_sessions[session_id]
+
+
+# ============== WebSocket for Health Data Chat (Dashboard) ==============
+
+
+@app.websocket("/ws/health-chat/{patient_id}")
+async def websocket_health_chat(websocket: WebSocket, patient_id: str):
+    """
+    WebSocket endpoint for health data chat on the dashboard.
+    This agent has access to the patient's vitals history and can answer
+    questions about their health data, trends, and provide insights.
+
+    Messages from client:
+    - {"type": "text", "content": "message text"}
+    - {"type": "audio", "data": "base64_audio", "format": "webm"}
+    - {"type": "get_greeting"}
+    - {"type": "end_session"}
+
+    Messages to client:
+    - {"type": "greeting", "content": "Hello!"}
+    - {"type": "response", "content": "AI response"}
+    - {"type": "transcription", "text": "transcribed text"}
+    - {"type": "audio_chunk", "audio": "base64_audio_chunk", "is_final": false}
+    - {"type": "session_summary", "data": {...}}
+    - {"type": "error", "message": "error description"}
+    """
+    await websocket.accept()
+
+    # Create health data chat agent for this session
+    try:
+        chat_agent = create_health_data_chat_agent(patient_id)
+        session_id = f"health_{patient_id}_{datetime.utcnow().timestamp()}"
+        active_chat_sessions[session_id] = chat_agent
+    except Exception as e:
+        await websocket.send_json(
+            {"type": "error", "message": f"Failed to initialize chat agent: {str(e)}"}
+        )
+        await websocket.close()
+        return
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+
+            if msg_type == "get_greeting":
+                greeting = chat_agent.get_greeting()
+                await websocket.send_json({"type": "greeting", "content": greeting})
+                await stream_tts_to_websocket(websocket, greeting)
+
+            elif msg_type == "text":
+                content = message.get("content", "")
+                if content:
+                    # Use the async resilient method
+                    result = await chat_agent.process_message_resilient(content)
+                    await websocket.send_json({
+                        "type": "response",
+                        "content": result["response"],
+                        "provider": result.get("provider", "unknown"),
+                        "fallback_used": result.get("fallback_used", False),
+                    })
+                    await stream_tts_to_websocket(websocket, result["response"])
+
+            elif msg_type == "audio":
+                audio_data = message.get("data", "")
+                audio_format = message.get("format", "webm")
+
+                if audio_data:
+                    transcription = await transcribe_base64(audio_data, audio_format)
+
+                    if transcription["success"] and transcription["text"]:
+                        await websocket.send_json(
+                            {"type": "transcription", "text": transcription["text"]}
+                        )
+
+                        # Use the async resilient method
+                        result = await chat_agent.process_message_resilient(transcription["text"])
+                        await websocket.send_json({
+                            "type": "response",
+                            "content": result["response"],
+                            "provider": result.get("provider", "unknown"),
+                            "fallback_used": result.get("fallback_used", False),
+                        })
+                        await stream_tts_to_websocket(websocket, result["response"])
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": transcription.get("error", "Transcription failed"),
+                        })
+
+            elif msg_type == "end_session":
+                summary = chat_agent.get_session_summary()
+                await websocket.send_json({"type": "session_summary", "data": summary})
+                break
+
+            else:
+                await websocket.send_json(
+                    {"type": "error", "message": f"Unknown message type: {msg_type}"}
+                )
+
+    except WebSocketDisconnect:
+        print(f"Health chat WebSocket disconnected for patient {patient_id}")
+    except Exception as e:
+        print(f"Health chat WebSocket error: {str(e)}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
         if session_id in active_chat_sessions:
             del active_chat_sessions[session_id]
 
@@ -998,3 +1192,67 @@ def get_assessment(hr_pct: float, hrv_pct: float) -> str:
         return "POSITIVE: Vitals improving relative to baseline."
     else:
         return "STABLE: Vitals within normal range of baseline."
+
+
+# ============== Health Check Endpoints ==============
+
+
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/health/llm")
+async def llm_health_check():
+    """
+    Get health status of all LLM providers.
+    Returns circuit breaker states and availability.
+    """
+    llm_client = get_llm_client()
+    return {
+        "status": "healthy",
+        "providers": llm_client.get_health_status(),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/health/detailed")
+async def detailed_health_check():
+    """
+    Comprehensive health check for all system components.
+    """
+    llm_client = get_llm_client()
+    llm_status = llm_client.get_health_status()
+    
+    # Check database connectivity
+    db_healthy = False
+    try:
+        # Simple ping
+        patients.find_one()
+        db_healthy = True
+    except Exception:
+        pass
+    
+    # Determine overall status
+    gemini_ok = llm_status["gemini"]["available"] and not llm_status["gemini"]["circuit_open"]
+    groq_ok = llm_status["groq"]["available"] and not llm_status["groq"]["circuit_open"]
+    vader_ok = llm_status["vader"]["available"]
+    
+    # System is healthy if we have at least one LLM OR vader fallback
+    llm_ok = gemini_ok or groq_ok or vader_ok
+    
+    overall_status = "healthy" if (db_healthy and llm_ok) else "degraded" if llm_ok else "unhealthy"
+    
+    return {
+        "status": overall_status,
+        "components": {
+            "database": {"healthy": db_healthy},
+            "llm": {
+                "healthy": llm_ok,
+                "providers": llm_status
+            },
+            "active_sessions": len(active_chat_sessions)
+        },
+        "timestamp": datetime.utcnow().isoformat()
+    }
