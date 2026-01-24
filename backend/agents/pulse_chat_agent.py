@@ -9,9 +9,9 @@ Now with full reliability architecture:
 - Never hangs on a patient
 """
 
-import os
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -19,16 +19,13 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+from .fallback_responses import (HARDCODED_NEUTRAL_FALLBACK,
+                                 ICEBREAKER_QUESTIONS, get_greeting_fallback,
+                                 get_icebreaker_question,
+                                 get_vital_response_fallback)
 # Reliability imports
-from .gatekeeper import process_input, Intent, GatekeeperResult
-from .llm_client import get_llm_client, ResilientLLMClient, LLMProvider
-from .fallback_responses import (
-    get_greeting_fallback,
-    get_vital_response_fallback,
-    get_icebreaker_question,
-    HARDCODED_NEUTRAL_FALLBACK,
-    ICEBREAKER_QUESTIONS,
-)
+from .gatekeeper import GatekeeperResult, Intent, process_input
+from .llm_client import LLMProvider, ResilientLLMClient, get_llm_client
 
 load_dotenv()
 

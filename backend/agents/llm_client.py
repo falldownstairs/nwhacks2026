@@ -11,13 +11,14 @@ Implements the "Intelligence Cascade" from the reliability spec:
 This ensures Pulsera NEVER hangs on a patient, even during total API failure.
 """
 
-import os
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List, Tuple
-from enum import Enum
-from datetime import datetime, timedelta
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
 import httpx
 from dotenv import load_dotenv
 
@@ -36,14 +37,11 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
-from .fallback_responses import (
-    HARDCODED_EMERGENCY_CONTACT,
-    HARDCODED_MAINTENANCE_MSG,
-    HARDCODED_NEUTRAL_FALLBACK,
-    get_greeting_fallback,
-    get_vital_response_fallback,
-    RiskLevel,
-)
+from .fallback_responses import (HARDCODED_EMERGENCY_CONTACT,
+                                 HARDCODED_MAINTENANCE_MSG,
+                                 HARDCODED_NEUTRAL_FALLBACK, RiskLevel,
+                                 get_greeting_fallback,
+                                 get_vital_response_fallback)
 from .gatekeeper import is_distressed
 
 load_dotenv()

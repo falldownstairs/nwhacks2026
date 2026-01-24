@@ -5,8 +5,8 @@ These hardcoded responses ensure the system NEVER leaves a patient hanging,
 even during total API failure.
 """
 
-from typing import Dict, Any
 from enum import Enum
+from typing import Any, Dict
 
 
 class RiskLevel(Enum):

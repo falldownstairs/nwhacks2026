@@ -1,20 +1,18 @@
 import asyncio
 import json
+import logging
 import os
 import sys
-import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from agents import (create_health_data_chat_agent, create_pulse_chat_agent,
                     run_agent_analysis, transcribe_base64)
-from agents.text_to_speech import synthesize_speech_streaming
+from agents.fallback_responses import (HARDCODED_NEUTRAL_FALLBACK,
+                                       SENSOR_MESSAGES,
+                                       get_icebreaker_question)
 from agents.llm_client import get_llm_client
-from agents.fallback_responses import (
-    SENSOR_MESSAGES,
-    get_icebreaker_question,
-    HARDCODED_NEUTRAL_FALLBACK,
-)
+from agents.text_to_speech import synthesize_speech_streaming
 from camera_stream import camera_websocket_endpoint
 from database import patients, vitals
 from db_helpers import (calculate_stats, get_all_vitals, get_baseline,

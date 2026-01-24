@@ -8,8 +8,8 @@ Now with full reliability architecture:
 - Cascading LLM fallbacks (Gemini -> Groq -> VADER -> Hardcoded)
 """
 
-import os
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -17,10 +17,10 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# Reliability imports
-from .gatekeeper import process_input, Intent, GatekeeperResult
-from .llm_client import get_llm_client, ResilientLLMClient, LLMProvider
 from .fallback_responses import HARDCODED_NEUTRAL_FALLBACK
+# Reliability imports
+from .gatekeeper import GatekeeperResult, Intent, process_input
+from .llm_client import LLMProvider, ResilientLLMClient, get_llm_client
 
 load_dotenv()
 

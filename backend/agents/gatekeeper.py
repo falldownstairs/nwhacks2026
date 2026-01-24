@@ -10,14 +10,12 @@ Features:
 """
 
 import re
-from typing import Tuple, Optional, Dict, Any
 from enum import Enum
+from typing import Any, Dict, Optional, Tuple
 
-from .fallback_responses import (
-    OUT_OF_SCOPE_RESPONSE,
-    PROMPT_INJECTION_RESPONSE,
-    HARDCODED_EMERGENCY_CONTACT,
-)
+from .fallback_responses import (HARDCODED_EMERGENCY_CONTACT,
+                                 OUT_OF_SCOPE_RESPONSE,
+                                 PROMPT_INJECTION_RESPONSE)
 
 
 class Intent(Enum):
